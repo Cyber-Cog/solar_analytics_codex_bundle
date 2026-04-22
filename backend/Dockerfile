@@ -49,17 +49,11 @@ WORKDIR /app/backend
 EXPOSE 8000
 
 # Default command: gunicorn managing Uvicorn workers for prod.
-# Workers default to (2 * CPU) - 1; override with GUNICORN_WORKERS.
+# Runtime tuning lives in gunicorn.conf.py and can still be overridden with env.
 ENV GUNICORN_WORKERS=3 \
     GUNICORN_TIMEOUT=180 \
     PORT=8000
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
-CMD ["sh", "-c", "gunicorn main:app \
-      --worker-class uvicorn.workers.UvicornWorker \
-      --workers ${GUNICORN_WORKERS} \
-      --bind 0.0.0.0:${PORT} \
-      --timeout ${GUNICORN_TIMEOUT} \
-      --access-logfile - \
-      --error-logfile -"]
+CMD ["gunicorn", "-c", "gunicorn.conf.py", "main:app"]

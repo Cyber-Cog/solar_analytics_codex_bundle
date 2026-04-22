@@ -23,10 +23,11 @@ Three containers behind one reverse proxy:
                              └────────────┘     └───────────┘
 ```
 
-- `backend` is FastAPI running under **gunicorn + UvicornWorker** in prod
-  (`gunicorn main:app --worker-class uvicorn.workers.UvicornWorker`). Local dev
-  can override the command to `uvicorn main:app --reload` if you prefer hot
-  reload (see *Local development* below).
+- `backend` is FastAPI running under **gunicorn + UvicornWorker** in prod.
+  The runtime entrypoint is `gunicorn -c gunicorn.conf.py main:app`, with
+  settings in `backend/gunicorn.conf.py`. Local dev can override the command to
+  `uvicorn main:app --reload` if you prefer hot reload (see *Local development*
+  below).
 - `nginx` serves the static UI and reverse-proxies `/api`, `/auth`, `/docs`,
   `/health`, `/openapi.json`.
 - `postgres` is shipped in the dev stack; in prod you can either keep it or
@@ -83,6 +84,8 @@ make prod                               # -f docker-compose.yml -f docker-compos
 Extras the prod overlay enables:
 
 - `GUNICORN_WORKERS=5` by default (tune per CPU count: `(2*CPU)+1`).
+- `backend/gunicorn.conf.py` centralises bind, worker class, timeouts, logs and
+  keepalive settings so prod tuning does not require Dockerfile edits.
 - DB port is NOT published to the host.
 - `SOLAR_MIGRATIONS_STRICT=1` makes the backend refuse to boot if a safe
   migration fails (instead of logging and continuing).

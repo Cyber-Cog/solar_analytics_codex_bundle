@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 from datetime import datetime, date
 import math
 
-from database import get_read_db
+from database import get_db, get_read_db
 from db_perf import choose_data_table
 from models import Plant, User, EquipmentSpec
 from schemas import (

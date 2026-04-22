@@ -22,11 +22,21 @@ if str(BACKEND_DIR) not in sys.path:
 os.environ.setdefault("SOLAR_SERVERLESS", "1")
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
+# Vercel's Python runtime scans for a top-level app/application/handler symbol.
+# Define it eagerly so detection succeeds before any conditional imports run.
+app = FastAPI(title="Solar Analytics Bootstrap")
+
 try:
-    from backend.main import app  # noqa: E402
+    from backend.main import app as backend_app  # noqa: E402
+    app = backend_app
 except Exception as exc:  # pragma: no cover - deploy-time diagnostic wrapper
     _trace = traceback.format_exc()
     app = FastAPI(title="Solar Analytics Startup Error")
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    @app.get("/favicon.png", include_in_schema=False)
+    def startup_error_favicon():
+        return JSONResponse(status_code=204, content=None)
 
     @app.get("/", include_in_schema=False)
     def startup_error_root():

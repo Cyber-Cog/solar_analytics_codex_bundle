@@ -14,15 +14,9 @@
     href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Manrope:wght@600;700;800&display=swap"
     rel="stylesheet">
 
-  <!-- Core CDN libs. All non-blocking now: React/ReactDOM/Recharts/ECharts must
-       finish before our boot loader runs, so the loader itself waits for
-       `window.React` before evaling page scripts (see boot.js). -->
+  <!-- React only in head; Recharts/ECharts/Lucide load in order from boot.js -->
   <script defer crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script defer crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script defer src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
-  <script defer src="https://unpkg.com/recharts@2.13.3/umd/Recharts.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
-  <script defer src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
 
   <!-- Preload only the modules that the first meaningful paint needs. The rest
        are fetched by boot.js after they're imported. -->
@@ -39,9 +33,13 @@
   <script>
     (function () {
       try {
-        var t = localStorage.getItem('solar_theme');
-        if (t === 'light') document.body.classList.add('theme-light');
+        var t = localStorage.getItem('solar_theme') || 'dark_ocean';
+        if (t === 'dark') t = 'dark_ocean';
+        if (t === 'light') t = 'light_paper';
+        document.body.setAttribute('data-solar-theme', t);
         if (t === 'vikram') document.body.classList.add('theme-vikram');
+        else if (t.indexOf('light_') === 0) document.body.classList.add('theme-light');
+        if (t !== 'dark_ocean' && t !== 'vikram') document.body.classList.add('theme-preset--' + t);
       } catch (e) { }
     })();
   </script>
@@ -54,7 +52,7 @@
       </div>
     </div>
   </div>
-  <script defer src="js/boot.js?v=phase4-boot-20260421-hotfix1"></script>
+  <script defer src="js/boot.js?v=phase5-perf-20260422"></script>
 </body>
 
 </html>

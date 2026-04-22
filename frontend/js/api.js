@@ -559,12 +559,17 @@ const Faults = {
   saveReview:  (body) => apiFetch('/api/faults/ds-review', { method: 'POST', body: JSON.stringify(body) }),
 };
 
+const SiteAppearance = {
+  get: () => apiFetch('/api/site/appearance'),
+};
+
 const Admin = {
   listUsers: () => apiFetch('/api/admin/users'),
   createUser: (data) => apiFetch('/api/admin/users', { method: 'POST', body: JSON.stringify(data) }),
   updateUser: (userId, data) => apiFetch(`/api/admin/users/${userId}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteUser: (userId) => apiFetch(`/api/admin/users/${userId}`, { method: 'DELETE' }),
   deletePlant: (plantId) => apiFetch(`/api/admin/plants/${encodeURIComponent(plantId)}`, { method: 'DELETE' }),
+  updateSiteAppearance: (data) => apiFetch('/api/admin/site-appearance', { method: 'PUT', body: JSON.stringify(data) }),
 };
 
 // ── Reports ───────────────────────────────────────────────────────────────────
@@ -595,4 +600,4 @@ const Reports = {
   },
 };
 
-window.SolarAPI = { Auth, Plants, Dashboard, Analytics, Metadata, Tickets, Faults, LossAnalysis, Admin, Reports, getToken, setToken, clearToken, getUser, setUser, apiBase: API_BASE };
+window.SolarAPI = { Auth, Plants, Dashboard, Analytics, Metadata, Tickets, Faults, LossAnalysis, Admin, Reports, SiteAppearance, getToken, setToken, clearToken, getUser, setUser, apiBase: API_BASE };

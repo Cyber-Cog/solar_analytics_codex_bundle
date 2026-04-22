@@ -73,7 +73,7 @@ const ThemeIconMoon = h('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fi
 // ── Topbar ────────────────────────────────────────────────────────────────────
 function Topbar({ page, plants, plantId, onPlantChange, onAddPlant, dateFrom, dateTo, onDateChange, user, theme, onThemeToggle, onThemeSelect, sidebarOpen, onToggleSidebar }) {
   const [showUserMenu, setShowUserMenu] = useState(false);
-  const isLight = theme === 'light';
+  const isLight = theme && (theme.startsWith('light_') || theme === 'light_paper');
   const PAGE_TITLES = {
     Dashboard: 'Dashboard',
     'Analytics Lab': 'Analytics Lab',
@@ -119,16 +119,27 @@ function Topbar({ page, plants, plantId, onPlantChange, onAddPlant, dateFrom, da
         window.DatePresetPicker && h(window.DatePresetPicker, { dateFrom, dateTo, onDateChange }),
       ),
       h('div', { className: 'topbar-group topbar-group-actions' },
-        h('button', { type: 'button', className: 'btn btn-outline theme-toggle-btn', onClick: onThemeToggle }, isLight ? ThemeIconMoon : ThemeIconSun),
+        h('button', { type: 'button', className: 'btn btn-outline theme-toggle-btn', onClick: onThemeToggle, title: 'Toggle light / dark' }, isLight ? ThemeIconMoon : ThemeIconSun),
         h('div', { className: 'user-menu-wrap' },
           h('div', { className: 'user-avatar', onClick: (e) => { e.stopPropagation(); setShowUserMenu(p => !p); } },
             (user?.full_name || user?.email || 'U')[0].toUpperCase(),
           ),
-          showUserMenu && h('div', { className: 'user-menu-dropdown' },
+          showUserMenu && h('div', { className: 'user-menu-dropdown user-menu-dropdown--themes' },
             h('div', { className: 'user-menu-title' }, 'Theme'),
-            h('button', { className: `user-menu-item ${theme === 'dark' ? 'active' : ''}`, onClick: () => onThemeSelect('dark') }, 'Dark'),
-            h('button', { className: `user-menu-item ${theme === 'light' ? 'active' : ''}`, onClick: () => onThemeSelect('light') }, 'Light'),
-            h('button', { className: `user-menu-item ${theme === 'vikram' ? 'active' : ''}`, onClick: () => onThemeSelect('vikram') }, 'Vikram Solar'),
+            h('div', { className: 'user-menu-theme-grid' },
+              ['dark_ocean', 'dark_ink', 'dark_forest', 'light_paper', 'light_air', 'light_sand'].map((id) => {
+                const labels = {
+                  dark_ocean: 'Dark · Ocean', dark_ink: 'Dark · Ink', dark_forest: 'Dark · Forest',
+                  light_paper: 'Light · Paper', light_air: 'Light · Air', light_sand: 'Light · Sand',
+                };
+                return h('button', {
+                  key: id,
+                  className: `user-menu-item ${theme === id ? 'active' : ''}`,
+                  onClick: () => { onThemeSelect(id); setShowUserMenu(false); },
+                }, labels[id] || id);
+              }),
+            ),
+            h('button', { className: `user-menu-item ${theme === 'vikram' ? 'active' : ''}`, onClick: () => { onThemeSelect('vikram'); setShowUserMenu(false); } }, 'Vikram Solar'),
           ),
         ),
       ),
@@ -292,15 +303,60 @@ function App() {
   const [faultSub, setFaultSub] = useState(() => parseLocationHash().faultSub);
   const [plants, setPlants] = useState([]);
   const [plantId, setPlantId] = useState(readStoredPlantId());
-  const [theme, setTheme] = useState(localStorage.getItem('solar_theme') || 'dark');
+  const SOLAR_CHUNK_PAGES = new Set(['Analytics Lab', 'Fault Diagnostics', 'Loss Analysis', 'Reports', 'Guidebook', 'Metadata', 'Admin']);
+  const [routeReady, setRouteReady] = useState(() => !SOLAR_CHUNK_PAGES.has(parseLocationHash().page));
+  const [routeLoadErr, setRouteLoadErr] = useState(null);
+  const [orgDefaultTheme, setOrgDefaultTheme] = useState('dark_ocean');
+
+  function normalizeSolarThemeId(x) {
+    if (!x || x === 'dark') return 'dark_ocean';
+    if (x === 'light') return 'light_paper';
+    return x;
+  }
+  function applySolarThemeToDocument(tid) {
+    var body = document.body;
+    var t = normalizeSolarThemeId(tid);
+    Array.prototype.slice.call(body.classList).filter(function (c) { return c.indexOf('theme-preset--') === 0; })
+      .forEach(function (c) { body.classList.remove(c); });
+    body.classList.remove('theme-light', 'theme-vikram');
+    body.setAttribute('data-solar-theme', t);
+    if (t === 'vikram') { body.classList.add('theme-vikram'); return; }
+    if (t.indexOf('light_') === 0) body.classList.add('theme-light');
+    if (t !== 'dark_ocean') body.classList.add('theme-preset--' + t);
+  }
+  const [theme, setThemeState] = useState(function () {
+    try {
+      var s = localStorage.getItem('solar_theme');
+      if (s != null && s !== '') return normalizeSolarThemeId(s);
+    } catch (e) {}
+    return 'dark_ocean';
+  });
+  const setTheme = useCallback(function (tid) {
+    var n = normalizeSolarThemeId(tid);
+    try { localStorage.setItem('solar_theme', n); } catch (e) {}
+    setThemeState(n);
+  }, []);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [dateFrom, setDateFrom] = useState(new Date(Date.now() - 7 * 864e5).toISOString().slice(0, 10));
   const [dateTo, setDateTo] = useState(new Date().toISOString().slice(0, 10));
 
   useLayoutEffect(() => {
-    document.body.classList.toggle('theme-light', theme === 'light');
-    document.body.classList.toggle('theme-vikram', theme === 'vikram');
+    applySolarThemeToDocument(theme);
   }, [theme]);
+
+  useEffect(() => {
+    window.__solarApplyThemeForPreview = function (tid) { applySolarThemeToDocument(tid); };
+    window.__solarGetStoredTheme = function () {
+      try { return normalizeSolarThemeId(localStorage.getItem('solar_theme')); }
+      catch (e) { return 'dark_ocean'; }
+    };
+    return function () {
+      try {
+        delete window.__solarApplyThemeForPreview;
+        delete window.__solarGetStoredTheme;
+      } catch (e2) {}
+    };
+  }, []);
 
   const handleToggleSidebar = useCallback(() => setSidebarOpen(v => !v), []);
   const handlePageChange = useCallback((p) => { window.location.hash = PAGE_TO_HASH[p] || 'dashboard'; }, []);
@@ -330,23 +386,74 @@ function App() {
     if (authed) window.SolarAPI.Plants.list().then(ps => { setPlants(ps); if (ps.length && !plantId) setPlantId(ps[0].plant_id); });
   }, [authed]);
 
-  if (loading) return h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', background: '#08111b' } }, 'Initializing...');
+  useEffect(() => {
+    if (!authed || !window.SolarAPI || !window.SolarAPI.SiteAppearance) return;
+    window.SolarAPI.SiteAppearance.get().then(function (r) {
+      var org = normalizeSolarThemeId(r && r.org_default_theme);
+      setOrgDefaultTheme(org);
+      try {
+        if (localStorage.getItem('solar_theme') == null) {
+          setTheme(org);
+        }
+      } catch (e) {}
+    }).catch(function () {});
+  }, [authed]);
+
+  useEffect(() => {
+    if (!authed) return;
+    if (!SOLAR_CHUNK_PAGES.has(page)) {
+      setRouteReady(true);
+      setRouteLoadErr(null);
+      return;
+    }
+    setRouteReady(false);
+    setRouteLoadErr(null);
+    var cancelled = false;
+    var t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
+    var run = (typeof window.__ensureRouteChunk === 'function')
+      ? window.__ensureRouteChunk(page)
+      : Promise.resolve();
+    run.then(function () {
+      if (cancelled) return;
+      try {
+        if (localStorage.getItem('solar_perf_log') === '1' && performance.now) {
+          console.info('[solar-perf] app-route-ready', page, Math.round(performance.now() - t0) + 'ms');
+        }
+      } catch (e) {}
+      setRouteReady(true);
+    }).catch(function (e) {
+      if (!cancelled) setRouteLoadErr((e && e.message) ? e.message : String(e));
+    });
+    return function () { cancelled = true; };
+  }, [page, authed]);
+
+  if (loading) return h('div', { className: 'route-loading-screen', style: { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, height: '100vh', background: '#08111b' } }, h(window.Spinner, { size: 28 }), h('span', { style: { color: '#9fb0c0', fontSize: 13 } }, 'Initializing…'));
   if (!authed) return h(window.AuthPage, { onLogin: (u) => { setUser(u); setAuthed(true); } });
 
   return h('div', { className: `app-layout ${sidebarOpen ? '' : 'mini-sidebar'}` },
     h(Sidebar, { page, faultSub, onNavigateFaultSub: handleNavigateFaultSub, onPageChange: handlePageChange, user, onLogout: handleLogout, sidebarOpen }),
     h('div', { className: 'main-area' },
-      h(Topbar, { page, plants, plantId, onPlantChange: (id) => { setPlantId(id); localStorage.setItem(PLANT_STORAGE_KEY, id); }, onAddPlant: () => { }, dateFrom, dateTo, onDateChange: (f, t) => { setDateFrom(f); setDateTo(t); }, user, theme, onThemeToggle: () => setTheme(t => t === 'dark' ? 'light' : 'dark'), onThemeSelect: setTheme, sidebarOpen, onToggleSidebar: handleToggleSidebar }),
+      h(Topbar, { page, plants, plantId, onPlantChange: (id) => { setPlantId(id); localStorage.setItem(PLANT_STORAGE_KEY, id); }, onAddPlant: () => { }, dateFrom, dateTo, onDateChange: (f, t) => { setDateFrom(f); setDateTo(t); }, user, theme, onThemeToggle: () => setTheme((theme && (theme.startsWith('light_') || theme === 'light_paper')) ? 'dark_ocean' : 'light_paper'), onThemeSelect: setTheme, sidebarOpen, onToggleSidebar: handleToggleSidebar }),
       h('div', { className: 'page-content', key: page },
-        page === 'Dashboard' && h(window.DashboardPage, { plantId, dateFrom, dateTo, onNavigate: handlePageChange }),
-        page === 'Fault Diagnostics' && h(window.FaultPage, { plantId, dateFrom, dateTo, faultSub, onNavigateFaultSub: handleNavigateFaultSub }),
-        page === 'Analytics Lab' && window.AnalyticsPage && h(window.AnalyticsPage, { plantId, dateFrom, dateTo, onNavigate: handlePageChange }),
-        page === 'Loss Analysis' && window.LossAnalysisPage && h(window.LossAnalysisPage, { plantId, dateFrom, dateTo }),
-        page === 'Reports' && window.ReportsPage && h(window.ReportsPage, { plantId, plants, dateFrom, dateTo }),
-        page === 'Guidebook' && window.GuidebookPage && h(window.GuidebookPage, null),
-        page === 'Metadata' && window.MetadataPage && h(window.MetadataPage, { plantId }),
-        page === 'Admin' && user?.is_admin && window.AdminPage && h(window.AdminPage, null),
-        page === 'Admin' && !user?.is_admin && h('div', { className: 'card', style: { padding: 24 } },
+        !routeReady && h('div', { className: 'route-loading-screen', style: { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14, minHeight: 320, padding: 32 } },
+          h(window.Spinner, { size: 32 }),
+          h('span', { style: { color: 'var(--text-soft)', fontSize: 13 } }, 'Loading module…'),
+          window.SkeletonLoader && h(window.SkeletonLoader, { count: 5, height: '12px' }),
+        ),
+        routeLoadErr && h('div', { className: 'card', style: { padding: 24, borderColor: 'rgba(235,107,107,0.35)' } },
+          h('h2', { style: { fontSize: 16, marginBottom: 8 } }, 'Could not load page scripts'),
+          h('p', { style: { color: 'var(--text-soft)', fontSize: 13, marginBottom: 8 } }, routeLoadErr),
+          h('p', { style: { color: 'var(--text-muted)', fontSize: 12 } }, 'Refresh the page. If the problem persists, clear cache and try again.'),
+        ),
+        routeReady && !routeLoadErr && page === 'Dashboard' && h(window.DashboardPage, { plantId, dateFrom, dateTo, onNavigate: handlePageChange }),
+        routeReady && !routeLoadErr && page === 'Fault Diagnostics' && h(window.FaultPage, { plantId, dateFrom, dateTo, faultSub, onNavigateFaultSub: handleNavigateFaultSub }),
+        routeReady && !routeLoadErr && page === 'Analytics Lab' && window.AnalyticsPage && h(window.AnalyticsPage, { plantId, dateFrom, dateTo, onNavigate: handlePageChange }),
+        routeReady && !routeLoadErr && page === 'Loss Analysis' && window.LossAnalysisPage && h(window.LossAnalysisPage, { plantId, dateFrom, dateTo }),
+        routeReady && !routeLoadErr && page === 'Reports' && window.ReportsPage && h(window.ReportsPage, { plantId, plants, dateFrom, dateTo }),
+        routeReady && !routeLoadErr && page === 'Guidebook' && window.GuidebookPage && h(window.GuidebookPage, null),
+        routeReady && !routeLoadErr && page === 'Metadata' && window.MetadataPage && h(window.MetadataPage, { plantId }),
+        routeReady && !routeLoadErr && page === 'Admin' && user?.is_admin && window.AdminPage && h(window.AdminPage, { orgDefaultTheme, onOrgThemeSaved: setOrgDefaultTheme }),
+        routeReady && !routeLoadErr && page === 'Admin' && !user?.is_admin && h('div', { className: 'card', style: { padding: 24 } },
           h('h2', { style: { fontSize: 16, marginBottom: 8 } }, 'Administrator access required'),
           h('p', { style: { color: 'var(--text-soft)', fontSize: 13 } }, 'Your account does not have permission to open the Admin area.'),
         ),

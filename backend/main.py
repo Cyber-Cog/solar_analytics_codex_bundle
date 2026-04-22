@@ -63,6 +63,7 @@ from routers.faults    import router as faults_router
 from routers.admin      import router as admin_router
 from routers.loss_analysis import router as loss_analysis_router, router_dashboard_alias as loss_analysis_dashboard_router
 from routers.reports    import router as reports_router
+from routers.site      import router as site_router
 
 
 def _ensure_equipment_spec_loss_columns():
@@ -270,6 +271,27 @@ app = FastAPI(
 )
 
 # ── GZip: compress all JSON responses > 1KB (massive win for large payloads) ──
+
+import logging as _logging_slow
+import time as _time_slow
+_solar_slow_log = _logging_slow.getLogger("solar.slow_api")
+
+
+@app.middleware("http")
+async def solar_log_slow_requests(request: Request, call_next):
+    t0 = _time_slow.perf_counter()
+    response = await call_next(request)
+    ms = (_time_slow.perf_counter() - t0) * 1000.0
+    path = request.url.path
+    if path.startswith("/api") and ms >= 1500.0:
+        _solar_slow_log.warning(
+            "slow_api ms=%.0f path=%s status=%s",
+            ms,
+            path,
+            getattr(response, "status_code", "?"),
+        )
+    return response
+
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
@@ -283,6 +305,7 @@ app.add_middleware(
 
 # ── Register Routers ──────────────────────────────────────────────────────────
 app.include_router(auth_router)
+app.include_router(site_router)
 app.include_router(plants_router)
 app.include_router(dashboard_router)
 app.include_router(analytics_router)

@@ -6,6 +6,10 @@ Admin-only routes for user management and plant access control.
 
 import os
 import shutil
+import json
+from datetime import datetime, timezone
+
+from pydantic import BaseModel, Field
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -189,3 +193,33 @@ def delete_plant_forever(
         pass
 
     return MessageResponse(message=f"Plant '{plant_id}' and all related data were deleted permanently")
+
+# -- Site appearance (org default theme; stored in fault_cache, no new tables) --
+from routers.site import SITE_APPEARANCE_KEY, _normalize_theme_id, ALLOWED_ORG_THEMES
+
+
+class SiteAppearanceUpdate(BaseModel):
+    org_default_theme: str = Field(..., min_length=2, max_length=32)
+
+
+@router.put("/site-appearance")
+def update_site_appearance(
+    payload: SiteAppearanceUpdate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_admin),
+):
+    raw = (payload.org_default_theme or "").strip()
+    if raw not in ALLOWED_ORG_THEMES:
+        raise HTTPException(status_code=400, detail="Invalid org_default_theme")
+    canon = _normalize_theme_id(raw)
+    body = {
+        "org_default_theme": canon,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    row = db.query(FaultCache).filter(FaultCache.cache_key == SITE_APPEARANCE_KEY).first()
+    if row:
+        row.payload = json.dumps(body)
+    else:
+        db.add(FaultCache(cache_key=SITE_APPEARANCE_KEY, payload=json.dumps(body)))
+    db.commit()
+    return {"ok": True, "org_default_theme": canon, "updated_at": body["updated_at"]}

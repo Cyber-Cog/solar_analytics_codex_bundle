@@ -1,30 +1,32 @@
 /*
  * frontend/js/boot.js
  * -------------------
- * Minimal boot loader.
+ * Boot sequence:
+ *   1. Wait for React / ReactDOM (from index.html).
+ *   2. Load chart/icon CDN libs in a fixed order (pinned versions).
+ *   3. Load core app scripts (auth + dashboard path).
+ *   4. theme_overrides.js (non-critical).
  *
- *   1. Wait for the CDN libraries (React / ReactDOM / Recharts / ECharts) to
- *      finish downloading — they are all loaded with `defer` in index.html,
- *      so once DOMContentLoaded fires we only need to poll briefly for the
- *      globals to appear.
- *   2. Load all app modules in parallel via plain <script src> tags (NOT fetch
- *      + eval, which blocks the browser's parser and disables dev-tools source
- *      mapping).
- *   3. Route-aware lazy chunks (fault_page.js, loss_analysis.js, etc.) are
- *      loaded on first route entry; see app.js for the trigger.
+ * Heavy route modules load on demand via window.__ensureRouteChunk(pageName).
  *
- * The old boot loader also installed a body-wide MutationObserver that
- * re-tagged modal elements on every DOM mutation. That observer has been
- * removed — modal components set their own className directly now (see
- * components.js).
+ * Diagnostics: localStorage.solar_perf_log = '1' logs phase timings.
  */
 
 (function () {
   'use strict';
 
-  var ASSET_BUILD_ID = 'phase4-boot-20260421-hotfix1';
+  var ASSET_BUILD_ID = 'phase5-perf-20260422';
 
-  // Session-scoped cache buster: resets on hard reload, sticks across SPA navs.
+  function perfLog(label, t0) {
+    try {
+      if (localStorage.getItem('solar_perf_log') !== '1') return;
+      var ms = (typeof performance !== 'undefined' && performance.now)
+        ? (performance.now() - t0)
+        : 0;
+      console.info('[solar-perf]', label, Math.round(ms) + 'ms');
+    } catch (e) { /* noop */ }
+  }
+
   var _sv = (function () {
     try {
       var v = sessionStorage.getItem('_sv');
@@ -34,10 +36,33 @@
   })();
   var cacheBust = '?v=' + ASSET_BUILD_ID + '_' + _sv;
 
-  // Modules loaded at startup. For compatibility with the existing app.js
-  // (which references page components as top-level globals) we keep the full
-  // list here. Once app.js is refactored to use the __loadModule() hook on
-  // route entry, heavy modules can move into LAZY_MODULES.
+  var CDN_SCRIPTS = [
+    'https://unpkg.com/prop-types@15.8.1/prop-types.min.js',
+    'https://unpkg.com/recharts@2.13.3/umd/Recharts.js',
+    'https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js',
+    'https://unpkg.com/lucide@0.487.0/dist/umd/lucide.min.js',
+  ];
+
+  function injectExternalScript(src) {
+    return new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = src;
+      s.async = false;
+      if (/unpkg\.com|jsdelivr\.net/.test(src)) {
+        s.crossOrigin = 'anonymous';
+      }
+      s.onload = function () { resolve(); };
+      s.onerror = function () { reject(new Error('failed to load ' + src)); };
+      document.head.appendChild(s);
+    });
+  }
+
+  function loadCdnChain() {
+    return CDN_SCRIPTS.reduce(function (p, url) {
+      return p.then(function () { return injectExternalScript(url); });
+    }, Promise.resolve());
+  }
+
   var CORE_MODULES = [
     'js/api.js',
     'js/ui_utils.js',
@@ -45,26 +70,22 @@
     'js/echart_wrapper.js',
     'js/dashboard_target.js',
     'js/pages.js',
-    'js/plant_architecture_viz.js',
-    'js/analytics_page_override.js',
-    'js/loss_analysis.js',
-    'js/inv_eff_analysis.js',
-    'js/fault_page.js',
-    'js/guidebook_page.js',
-    'js/reports_page.js',
-    'js/admin_page.js',
-    'js/app.js'
+    'js/app.js',
   ];
 
-  // Reserved for the next iteration: route-specific chunks.
-  var LAZY_MODULES = {
-    /* Example entry:
-    'fault-charts': ['js/fault_charts.js'],
-    */
+  var ROUTE_CHUNKS = {
+    'Analytics Lab': ['js/analytics_page_override.js'],
+    'Fault Diagnostics': ['js/inv_eff_analysis.js', 'js/fault_page.js'],
+    'Loss Analysis': ['js/loss_analysis.js'],
+    'Reports': ['js/reports_page.js'],
+    'Guidebook': ['js/guidebook_page.js'],
+    'Metadata': ['js/plant_architecture_viz.js'],
+    'Admin': ['js/admin_page.js'],
   };
 
   var _loaded = Object.create(null);
   var _fetchedText = Object.create(null);
+  var _chunkPromises = Object.create(null);
 
   function fetchScriptText(src) {
     if (_fetchedText[src]) return _fetchedText[src];
@@ -81,9 +102,6 @@
     _loaded[src] = fetchScriptText(src).then(function (code) {
       return new Promise(function (resolve, reject) {
         var s = document.createElement('script');
-        // Legacy page files share many top-level `const` names. Wrapping every
-        // file in its own IIFE preserves the old isolation semantics while
-        // keeping deliberate globals such as `window.AuthPage`.
         s.text = [
           '(function () {',
           code,
@@ -106,9 +124,6 @@
     return _loaded[src];
   }
 
-  // Load a list in order-preserving parallel: all start downloading at once,
-  // but the browser runs them in the sequence we requested. Resolves when the
-  // last one finishes.
   function loadAllOrdered(srcs) {
     var fetched = srcs.map(fetchScriptText);
     return fetched.reduce(function (chain, _promise, idx) {
@@ -132,16 +147,24 @@
       '</div>';
   }
 
-  // Expose a helper for app.js to lazy-load a feature bundle:
-  //     await window.__loadModule('fault')
+  window.__ensureRouteChunk = function (page) {
+    var list = ROUTE_CHUNKS[page];
+    if (!list || !list.length) return Promise.resolve();
+    if (_chunkPromises[page]) return _chunkPromises[page];
+    var t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
+    _chunkPromises[page] = loadAllOrdered(list).then(function () {
+      perfLog('route-chunk:' + page, t0);
+      return page;
+    });
+    return _chunkPromises[page];
+  };
+
   window.__loadModule = function (name) {
-    var list = LAZY_MODULES[name];
+    var list = ROUTE_CHUNKS[name];
     if (!list) return Promise.resolve();
     return loadAllOrdered(list);
   };
 
-  // Wait for React / ReactDOM to appear (the CDN scripts are deferred; once
-  // DOMContentLoaded has fired they are guaranteed to run soon after).
   function whenReact() {
     return new Promise(function (resolve) {
       if (window.React && window.ReactDOM) return resolve();
@@ -151,7 +174,7 @@
         if (window.React && window.ReactDOM) {
           clearInterval(id);
           resolve();
-        } else if (tries > 200) {   // ~10 s
+        } else if (tries > 200) {
           clearInterval(id);
           console.error('Boot: React did not load after 10 s');
           resolve();
@@ -160,11 +183,25 @@
     });
   }
 
-  whenReact().then(function () {
-    return loadAllOrdered(CORE_MODULES);
-  }).then(function () {
-    // theme_overrides waits for the named React components (AuthPage, Card,
-    // Spinner) to exist before wrapping them — it is small and non-critical.
-    return loadScript('js/theme_overrides.js');
-  }).catch(showBootError);
+  var _bootT0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
+  whenReact()
+    .then(function () {
+      perfLog('react-ready', _bootT0);
+      return loadCdnChain();
+    })
+    .then(function () {
+      perfLog('cdn-charts-ready', _bootT0);
+      return loadAllOrdered(CORE_MODULES);
+    })
+    .then(function () {
+      perfLog('core-modules-ready', _bootT0);
+      return loadScript('js/theme_overrides.js');
+    })
+    .then(function () {
+      perfLog('boot-complete', _bootT0);
+      try {
+        window.dispatchEvent(new CustomEvent('solar-boot-complete'));
+      } catch (e) { /* noop */ }
+    })
+    .catch(showBootError);
 })();

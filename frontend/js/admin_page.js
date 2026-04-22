@@ -1,12 +1,14 @@
-/**
+﻿/**
  * js/admin_page.js
  * =================
  * Admin-only page for User Management and RBAC Plant Mapping.
  */
 
-window.AdminPage = () => {
+window.AdminPage = (props = {}) => {
+  const { orgDefaultTheme, onOrgThemeSaved } = props;
   const { useState, useEffect } = React;
   const h = React.createElement;
+  const { Card, Badge, Modal, DataTable } = window;
 
   const [users, setUsers] = useState([]);
   const [plants, setPlants] = useState([]);
@@ -17,6 +19,33 @@ window.AdminPage = () => {
   
   const [form, setForm] = useState({ email:'', full_name:'', password:'', is_admin: false, allowed_plants:'' });
   const [editForm, setEditForm] = useState({ email:'', full_name:'', password:'', is_active:true, is_admin: false, allowed_plants:'' });
+
+  const THEME_SWATCHES = [
+    { id: 'dark_ocean', label: 'Dark · Ocean' },
+    { id: 'dark_ink', label: 'Dark · Ink' },
+    { id: 'dark_forest', label: 'Dark · Forest' },
+    { id: 'light_paper', label: 'Light · Paper' },
+    { id: 'light_air', label: 'Light · Air' },
+    { id: 'light_sand', label: 'Light · Sand' },
+    { id: 'vikram', label: 'Vikram Solar' },
+  ];
+  const [appearanceDraft, setAppearanceDraft] = useState(() => orgDefaultTheme || 'dark_ocean');
+  const [appearanceSaving, setAppearanceSaving] = useState(false);
+
+  useEffect(() => {
+    setAppearanceDraft(orgDefaultTheme || 'dark_ocean');
+  }, [orgDefaultTheme]);
+
+  useEffect(() => {
+    return function () {
+      try {
+        var fn = window.__solarApplyThemeForPreview;
+        var gt = window.__solarGetStoredTheme;
+        if (fn && gt) fn(gt());
+      } catch (e) {}
+    };
+  }, []);
+
 
   const normalizePlants = (value) => {
     return String(value || '')
@@ -161,6 +190,24 @@ window.AdminPage = () => {
     }
   };
 
+
+  const saveOrgAppearance = async () => {
+    if (!window.SolarAPI.Admin.updateSiteAppearance) {
+      alert('Update API not available. Refresh the app.');
+      return;
+    }
+    setAppearanceSaving(true);
+    try {
+      var r = await window.SolarAPI.Admin.updateSiteAppearance({ org_default_theme: appearanceDraft });
+      if (onOrgThemeSaved) onOrgThemeSaved(r.org_default_theme || appearanceDraft);
+      alert('Organization default theme saved.');
+    } catch (e) {
+      alert((e && (e.message || e.detail)) ? (e.message || e.detail) : String(e));
+    } finally {
+      setAppearanceSaving(false);
+    }
+  };
+
   const handleDeletePlant = async (plantId) => {
     const ok = confirm(
       `Delete plant "${plantId}" forever?\n\nThis will permanently remove the plant, raw data, architecture, equipment specs, faults, snapshots, and related records from the database.`
@@ -264,6 +311,52 @@ window.AdminPage = () => {
       h('button', { className:'btn btn-primary', onClick: () => setShowCreate(true) }, 'Create New User')
     ),
 
+
+    h(Card, { title: 'Organization appearance', style: { marginBottom: 16 } },
+      h('p', { style: { fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 } },
+        'Choose the default theme for new visitors who have not picked a personal theme. Hover swatches to preview; click to select; Save applies for the organization.'),
+      h('div', {
+        style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 10, marginBottom: 12 },
+        onMouseLeave: function () {
+          try {
+            var fn = window.__solarApplyThemeForPreview;
+            var gt = window.__solarGetStoredTheme;
+            if (fn && gt) fn(gt());
+          } catch (e) {}
+        },
+      },
+        THEME_SWATCHES.map(function (sw) {
+          var active = appearanceDraft === sw.id;
+          return h('button', {
+            key: sw.id,
+            type: 'button',
+            onClick: function () { setAppearanceDraft(sw.id); },
+            onMouseEnter: function () {
+              try {
+                if (window.__solarApplyThemeForPreview) window.__solarApplyThemeForPreview(sw.id);
+              } catch (e) {}
+            },
+            style: {
+              textAlign: 'left',
+              padding: '10px 12px',
+              borderRadius: 10,
+              border: active ? '2px solid var(--accent)' : '1px solid var(--line)',
+              background: active ? 'var(--accent-soft)' : 'var(--panel)',
+              color: 'var(--text)',
+              cursor: 'pointer',
+              fontSize: 12,
+              fontWeight: 600,
+            },
+          }, sw.label);
+        }),
+      ),
+      h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
+        h('button', { className: 'btn btn-primary', disabled: appearanceSaving, onClick: saveOrgAppearance },
+          appearanceSaving ? 'Savingâ€¦' : 'Save organization default'),
+        h('span', { style: { fontSize: 11, color: 'var(--text-muted)' } }, 'Current draft: ' + appearanceDraft),
+      ),
+    ),
+
     h(Card, { title:`System Users (${users.length})` },
       h(DataTable, {
         columns: userColumns,
@@ -311,7 +404,7 @@ window.AdminPage = () => {
         ),
         h('div', { className:'form-group' },
           h('label', { className:'form-label' }, 'Password'),
-          h('input', { className:'form-input', type:'password', value:form.password, onChange:e=>setForm({...form, password:e.target.value}), placeholder:'••••••••' })
+          h('input', { className:'form-input', type:'password', value:form.password, onChange:e=>setForm({...form, password:e.target.value}), placeholder:'â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢' })
         ),
         h('div', { style:{display:'flex', alignItems:'center', gap:10, margin:'10px 0'} },
           h('input', { type:'checkbox', id:'is_admin', checked:form.is_admin, onChange:e=>setForm({...form, is_admin:e.target.checked}) }),
@@ -356,3 +449,4 @@ window.AdminPage = () => {
     )
   );
 };
+

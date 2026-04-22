@@ -7,7 +7,7 @@ from sqlalchemy import text
 from sqlalchemy import func
 from typing import List, Optional, Tuple
 from auth.routes import get_current_user
-from database import get_db
+from database import get_db, get_read_db
 from db_perf import choose_data_table
 from soiling_queries import (
     build_plant_soiling_payload,
@@ -1433,7 +1433,7 @@ def get_unified_fault_feed(
     plant_id: str = Query(...),
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_read_db),
     current_user: User = Depends(get_current_user),
 ):
     """Single round-trip overview: aggregate tiles + normalized fault rows for the unified table."""

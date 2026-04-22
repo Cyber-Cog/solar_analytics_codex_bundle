@@ -54,7 +54,7 @@ def _compute_inv_eff_aggregate(db: Session, plant_id: str, _from: str, _to: str)
                  MAX(CASE WHEN signal='ac_power' THEN value END) AS ac_kw
             FROM raw_data_generic
            WHERE plant_id = :p
-             AND equipment_level = 'inverter'
+                           AND LOWER(TRIM(equipment_level::text)) = 'inverter'
              AND timestamp BETWEEN :f AND :t
            GROUP BY timestamp, equipment_id
         ),
@@ -1597,7 +1597,7 @@ def get_inverter_efficiency_analysis(
                MAX(CASE WHEN signal='ac_power' THEN value END) as ac_kw
         FROM raw_data_generic
         WHERE plant_id = :plant_id
-          AND equipment_level = 'inverter'
+          AND LOWER(TRIM(equipment_level::text)) = 'inverter'
           AND timestamp BETWEEN :f AND :t
         GROUP BY timestamp, equipment_id
     """)

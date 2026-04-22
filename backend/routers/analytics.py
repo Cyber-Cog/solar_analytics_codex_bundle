@@ -351,7 +351,7 @@ def get_available_signals(
             SELECT DISTINCT signal
             FROM raw_data_generic
             WHERE plant_id = :plant_id
-              AND equipment_level = 'inverter'
+              AND LOWER(TRIM(equipment_level::text)) = 'inverter'
               AND timestamp >= :since
             UNION
             SELECT DISTINCT signal
@@ -363,7 +363,7 @@ def get_available_signals(
             SELECT DISTINCT signal
             FROM dc_hierarchy_derived
             WHERE plant_id = :plant_id
-              AND equipment_level = 'inverter'
+              AND LOWER(TRIM(equipment_level::text)) = 'inverter'
               AND timestamp >= :since
             ORDER BY signal
         """)

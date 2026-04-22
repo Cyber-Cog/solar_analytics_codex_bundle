@@ -13,6 +13,10 @@ import os
 import sys
 import mimetypes
 import threading
+import logging as _logging_slow
+import time as _time_slow
+
+_solar_slow_log = _logging_slow.getLogger("solar.slow_api")
 
 # ── Load .env file if present (DATABASE_URL, etc.) ───────────────────────────
 _env_path = os.path.join(os.path.dirname(__file__), ".env")
@@ -271,10 +275,6 @@ app = FastAPI(
 )
 
 # ── GZip: compress all JSON responses > 1KB (massive win for large payloads) ──
-
-import logging as _logging_slow
-import time as _time_slow
-_solar_slow_log = _logging_slow.getLogger("solar.slow_api")
 
 
 @app.middleware("http")

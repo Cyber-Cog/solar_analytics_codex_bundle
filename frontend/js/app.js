@@ -58,6 +58,34 @@ function shiftIsoDate(value, days) {
   return base.toISOString().slice(0, 10);
 }
 
+/** Canonical theme ids — must match server ALLOWED_ORG_THEMES / admin swatches. */
+const SOLAR_THEME_IDS = new Set([
+  'dark_ocean', 'dark_ink', 'dark_forest',
+  'light_paper', 'light_air', 'light_sand',
+  'vikram',
+]);
+
+function normalizeSolarThemeId(x) {
+  if (x == null || x === '') return 'dark_ocean';
+  const s = String(x).trim();
+  if (s === 'dark') return 'dark_ocean';
+  if (s === 'light') return 'light_paper';
+  if (!SOLAR_THEME_IDS.has(s)) return 'dark_ocean';
+  return s;
+}
+
+function applySolarThemeToDocument(tid) {
+  const body = document.body;
+  const t = normalizeSolarThemeId(tid);
+  Array.prototype.slice.call(body.classList).filter((c) => c.indexOf('theme-preset--') === 0)
+    .forEach((c) => { body.classList.remove(c); });
+  body.classList.remove('theme-light', 'theme-vikram');
+  body.setAttribute('data-solar-theme', t);
+  if (t === 'vikram') { body.classList.add('theme-vikram'); return; }
+  if (t.indexOf('light_') === 0) body.classList.add('theme-light');
+  if (t !== 'dark_ocean') body.classList.add('theme-preset--' + t);
+}
+
 const ThemeIconSun = h('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
   h('circle', { cx: 12, cy: 12, r: 4 }),
   h('line', { x1: 12, y1: 1, x2: 12, y2: 3 }), h('line', { x1: 12, y1: 21, x2: 12, y2: 23 }),
@@ -308,22 +336,6 @@ function App() {
   const [routeLoadErr, setRouteLoadErr] = useState(null);
   const [orgDefaultTheme, setOrgDefaultTheme] = useState('dark_ocean');
 
-  function normalizeSolarThemeId(x) {
-    if (!x || x === 'dark') return 'dark_ocean';
-    if (x === 'light') return 'light_paper';
-    return x;
-  }
-  function applySolarThemeToDocument(tid) {
-    var body = document.body;
-    var t = normalizeSolarThemeId(tid);
-    Array.prototype.slice.call(body.classList).filter(function (c) { return c.indexOf('theme-preset--') === 0; })
-      .forEach(function (c) { body.classList.remove(c); });
-    body.classList.remove('theme-light', 'theme-vikram');
-    body.setAttribute('data-solar-theme', t);
-    if (t === 'vikram') { body.classList.add('theme-vikram'); return; }
-    if (t.indexOf('light_') === 0) body.classList.add('theme-light');
-    if (t !== 'dark_ocean') body.classList.add('theme-preset--' + t);
-  }
   const [theme, setThemeState] = useState(function () {
     try {
       var s = localStorage.getItem('solar_theme');
@@ -406,6 +418,11 @@ function App() {
       setRouteLoadErr(null);
       return;
     }
+    if (page === 'Admin' && user && !user.is_admin) {
+      setRouteReady(true);
+      setRouteLoadErr(null);
+      return;
+    }
     setRouteReady(false);
     setRouteLoadErr(null);
     var cancelled = false;
@@ -425,7 +442,7 @@ function App() {
       if (!cancelled) setRouteLoadErr((e && e.message) ? e.message : String(e));
     });
     return function () { cancelled = true; };
-  }, [page, authed]);
+  }, [page, authed, user?.is_admin]);
 
   if (loading) return h('div', { className: 'route-loading-screen', style: { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, height: '100vh', background: '#08111b' } }, h(window.Spinner, { size: 28 }), h('span', { style: { color: '#9fb0c0', fontSize: 13 } }, 'Initializing…'));
   if (!authed) return h(window.AuthPage, { onLogin: (u) => { setUser(u); setAuthed(true); } });

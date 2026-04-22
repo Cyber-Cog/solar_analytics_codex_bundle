@@ -8,6 +8,13 @@
   <meta name="description" content="Clean enterprise theme for Solar Analytics">
   <link rel="icon" type="image/png" href="images/logo.png">
 
+  <link rel="preconnect" href="https://unpkg.com" crossorigin>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="preload" href="https://unpkg.com/prop-types@15.8.1/prop-types.min.js" as="script" crossorigin>
+  <link rel="preload" href="https://unpkg.com/recharts@2.13.3/umd/Recharts.js" as="script" crossorigin>
+  <link rel="preload" href="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js" as="script" crossorigin>
+  <link rel="preload" href="https://unpkg.com/lucide@0.487.0/dist/umd/lucide.min.js" as="script" crossorigin>
+
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link
@@ -33,9 +40,14 @@
   <script>
     (function () {
       try {
-        var t = localStorage.getItem('solar_theme') || 'dark_ocean';
-        if (t === 'dark') t = 'dark_ocean';
-        if (t === 'light') t = 'light_paper';
+        var ALLOWED = { dark_ocean: 1, dark_ink: 1, dark_forest: 1, light_paper: 1, light_air: 1, light_sand: 1, vikram: 1 };
+        function normTheme(raw) {
+          var s = (raw == null || raw === '') ? 'dark_ocean' : String(raw).trim();
+          if (s === 'dark') return 'dark_ocean';
+          if (s === 'light') return 'light_paper';
+          return ALLOWED[s] ? s : 'dark_ocean';
+        }
+        var t = normTheme(localStorage.getItem('solar_theme'));
         document.body.setAttribute('data-solar-theme', t);
         if (t === 'vikram') document.body.classList.add('theme-vikram');
         else if (t.indexOf('light_') === 0) document.body.classList.add('theme-light');
@@ -52,7 +64,7 @@
       </div>
     </div>
   </div>
-  <script defer src="js/boot.js?v=phase5-perf-20260422"></script>
+  <script defer src="js/boot.js?v=phase5-vercel-cdn-20260423"></script>
 </body>
 
 </html>

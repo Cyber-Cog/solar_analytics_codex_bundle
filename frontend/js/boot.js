@@ -3,7 +3,8 @@
  * -------------------
  * Boot sequence:
  *   1. Wait for React / ReactDOM (from index.html).
- *   2. Load chart/icon CDN libs in a fixed order (pinned versions).
+ *   2. Load chart/icon CDN libs: PropTypes first (Recharts expects it), then
+ *      Recharts + ECharts + Lucide in parallel to cut Vercel cold-boot latency.
  *   3. Load core app scripts (auth + dashboard path).
  *   4. theme_overrides.js (non-critical).
  *
@@ -15,7 +16,7 @@
 (function () {
   'use strict';
 
-  var ASSET_BUILD_ID = 'phase5-perf-20260422';
+  var ASSET_BUILD_ID = 'phase5-vercel-cdn-20260423';
 
   function perfLog(label, t0) {
     try {
@@ -36,8 +37,8 @@
   })();
   var cacheBust = '?v=' + ASSET_BUILD_ID + '_' + _sv;
 
-  var CDN_SCRIPTS = [
-    'https://unpkg.com/prop-types@15.8.1/prop-types.min.js',
+  var CDN_PROP_TYPES = 'https://unpkg.com/prop-types@15.8.1/prop-types.min.js';
+  var CDN_PARALLEL = [
     'https://unpkg.com/recharts@2.13.3/umd/Recharts.js',
     'https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js',
     'https://unpkg.com/lucide@0.487.0/dist/umd/lucide.min.js',
@@ -58,9 +59,11 @@
   }
 
   function loadCdnChain() {
-    return CDN_SCRIPTS.reduce(function (p, url) {
-      return p.then(function () { return injectExternalScript(url); });
-    }, Promise.resolve());
+    return injectExternalScript(CDN_PROP_TYPES).then(function () {
+      return Promise.all(CDN_PARALLEL.map(function (url) {
+        return injectExternalScript(url);
+      }));
+    });
   }
 
   var CORE_MODULES = [

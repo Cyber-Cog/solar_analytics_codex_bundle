@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pycache
+
+# Environment
+.env
+*.env
+!.env.example
+
+# Databases & dumps
+*.db
+*.sql
+*.dump
+*.bak
+
+# Archives
+*.zip
+*.7z
+*.tar
+*.tar.gz
+*.tgz
+
+# Logs & runtime output
+logs/
+backend/logs/
+*.log
+output*.txt
+server_log.txt
+uvicorn_log.txt
+
+# Scratch / temp working folders (never commit raw data exports)
+tmp/
+tmp_*/
+scratch/
+*.xlsx
+*.xls
+*.csv
+# ...but keep shipped templates if any live under backend/common/templates.py code (not under tmp/)
+
+# Uploaded spec sheets and user uploads (keep folder structure only)
+backend/uploads/spec_sheets/*/*
+!backend/uploads/spec_sheets/.gitkeep
+
+# Local backups (user-configurable, never inside repo)
+backups/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/

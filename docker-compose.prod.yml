@@ -1,0 +1,41 @@
+# Production overlay.
+#
+# Usage (small VM with everything on-box):
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Usage (managed DB, e.g. AWS RDS): drop the `db` service by supplying an
+# external DATABASE_URL in .env, then:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+#                  -f docker-compose.rds.yml up -d --build
+#
+# This file hardens the defaults:
+#   - more gunicorn workers
+#   - restart policies stay "unless-stopped" but we drop port exposure on db
+#   - mounts a read-only nginx.conf (customise on the host, no rebuild needed)
+
+services:
+  db:
+    # Don't publish 5432 to the world on a public VM.
+    ports: !reset []
+
+  backend:
+    environment:
+      GUNICORN_WORKERS: "${GUNICORN_WORKERS:-5}"
+      GUNICORN_TIMEOUT: "${GUNICORN_TIMEOUT:-180}"
+      # Flip to 1 to have the startup migration runner bail on failure instead
+      # of logging and continuing. Safer in production.
+      SOLAR_MIGRATIONS_STRICT: "${SOLAR_MIGRATIONS_STRICT:-0}"
+    deploy:
+      resources:
+        limits:
+          cpus: "${BACKEND_CPU_LIMIT:-2.0}"
+          memory: "${BACKEND_MEM_LIMIT:-2g}"
+
+  nginx:
+    # Production typically terminates TLS on nginx. Mount a custom conf on the
+    # host at ./deploy/nginx.prod.conf to override the baked-in one.
+    volumes:
+      - ./deploy/nginx.prod.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"

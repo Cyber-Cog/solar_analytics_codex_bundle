@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Solar Analytics Platform</title>
+  <meta name="description" content="Clean enterprise theme for Solar Analytics">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Manrope:wght@600;700;800&display=swap"
+    rel="stylesheet">
+
+  <!-- Core CDN libs. All non-blocking now: React/ReactDOM/Recharts/ECharts must
+       finish before our boot loader runs, so the loader itself waits for
+       `window.React` before evaling page scripts (see boot.js). -->
+  <script defer crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script defer crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script defer src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
+  <script defer src="https://unpkg.com/recharts@2.13.3/umd/Recharts.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <script defer src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+
+  <!-- Preload only the modules that the first meaningful paint needs. The rest
+       are fetched by boot.js after they're imported. -->
+  <link rel="preload" href="js/api.js" as="script">
+  <link rel="preload" href="js/components.js" as="script">
+  <link rel="preload" href="js/pages.js" as="script">
+  <link rel="preload" href="js/app.js" as="script">
+
+  <link rel="stylesheet" href="css/app.css">
+  <link rel="stylesheet" href="css/enhancements.css">
+</head>
+
+<body>
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem('solar_theme');
+        if (t === 'light') document.body.classList.add('theme-light');
+        if (t === 'vikram') document.body.classList.add('theme-vikram');
+      } catch (e) { }
+    })();
+  </script>
+  <div id="root">
+    <div class="auth-page auth-initial-load"
+      style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(180deg,#08111b 0%,#091421 100%);position:relative;overflow:hidden;">
+      <div class="auth-loading-placeholder" style="text-align:center;z-index:1;">
+        <div class="auth-loading-sun" style="width:48px;height:48px;margin:0 auto 12px;opacity:0.9;"></div>
+        <p style="font-family:var(--font,Inter),sans-serif;color:var(--text-soft,#a8b8c8);font-size:13px;">Loading…</p>
+      </div>
+    </div>
+  </div>
+  <script defer src="js/boot.js?v=phase4-boot-20260421-hotfix1"></script>
+</body>
+
+</html>

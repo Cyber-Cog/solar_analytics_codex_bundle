@@ -1,0 +1,25 @@
+# PostgreSQL for Solar Analytics (required for the app).
+# Run:  docker-compose up -d
+# Set backend/.env:  DATABASE_URL=postgresql://solar:solar@localhost:5432/solar
+# Start the app; tables are created automatically. Legacy SQLite data: use pgloader or CSV import.
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: solar-postgres
+    environment:
+      POSTGRES_USER: solar
+      POSTGRES_PASSWORD: solar
+      POSTGRES_DB: solar
+    ports:
+      - "5432:5432"
+    volumes:
+      - solar_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U solar -d solar"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  solar_pg_data:

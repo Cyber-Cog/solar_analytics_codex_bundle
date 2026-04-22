@@ -1,0 +1,99 @@
+# Solar Analytics — one-command local stack.
+#
+# Bring up (PostgreSQL + backend + nginx + Redis cache):
+#   docker compose up -d --build
+#
+# First boot:
+#   docker compose exec backend python -m migrations.runner status
+#   docker compose exec backend python -m migrations.runner auto   # safe migrations
+#
+# Backups are written to ./backups on the host via the scripts in scripts/.
+# See backend/docs/BACKUP_AND_RESTORE.md.
+
+name: solar-analytics
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-solar}
+      POSTGRES_USER: ${POSTGRES_USER:-solar}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-solar}
+    # Tuning kept conservative for developer laptops; override in prod compose.
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "work_mem=16MB"
+      - "-c"
+      - "max_connections=100"
+      - "-c"
+      - "log_min_duration_statement=500"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./backups:/backups
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-solar} -d ${POSTGRES_DB:-solar}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-solar}:${POSTGRES_PASSWORD:-solar}@db:5432/${POSTGRES_DB:-solar}
+      # Read-replica placeholder; in a local stack it points at the same DB but
+      # uses its own pool so interactive reads are never blocked by uploads.
+      DATABASE_URL_READ: postgresql://${POSTGRES_USER:-solar}:${POSTGRES_PASSWORD:-solar}@db:5432/${POSTGRES_DB:-solar}
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      GUNICORN_WORKERS: ${GUNICORN_WORKERS:-3}
+      GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-180}
+      PORT: "8000"
+    volumes:
+      - uploads:/app/backend/uploads
+    # Only expose backend port for dev; in prod only nginx is public.
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  nginx:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+
+volumes:
+  db_data:
+  uploads:

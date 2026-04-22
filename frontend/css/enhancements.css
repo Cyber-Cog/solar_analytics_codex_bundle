@@ -1,0 +1,458 @@
+/*
+  frontend/css/enhancements.css
+  ─────────────────────────────
+  Premium UI layer — loaded AFTER index.html inline styles.
+  All rules here are purely additive; nothing removes existing functionality.
+*/
+
+/* ═══════════════════════════════════════════════════════
+   KEYFRAMES
+═══════════════════════════════════════════════════════ */
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0);    }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes shimmerWave {
+  0%   { background-position: -700px 0; }
+  100% { background-position:  700px 0; }
+}
+
+@keyframes pulseStatusDot {
+  0%, 100% { box-shadow: 0 0 0 0   rgba(52,200,137,0.65); }
+  50%       { box-shadow: 0 0 0 7px rgba(52,200,137,0);    }
+}
+
+@keyframes pulseWarnDot {
+  0%, 100% { box-shadow: 0 0 0 0   rgba(228,161,70,0.65); }
+  50%       { box-shadow: 0 0 0 7px rgba(228,161,70,0);    }
+}
+
+@keyframes toastSlideIn {
+  from { opacity: 0; transform: translateX(48px) scale(0.94); }
+  to   { opacity: 1; transform: translateX(0)    scale(1);    }
+}
+
+@keyframes toastSlideOut {
+  from { opacity: 1; transform: translateX(0)    scale(1);    }
+  to   { opacity: 0; transform: translateX(48px) scale(0.94); }
+}
+
+@keyframes spinnerRotate {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes countPop {
+  0%   { transform: scale(0.82); opacity: 0; }
+  65%  { transform: scale(1.06); opacity: 1; }
+  100% { transform: scale(1);    opacity: 1; }
+}
+
+@keyframes heroBarGrow {
+  from { width: 0; }
+  to   { width: var(--bar-width, 80%); }
+}
+
+@keyframes glowPulse {
+  0%, 100% { filter: brightness(1);    }
+  50%       { filter: brightness(1.18); }
+}
+
+/* ═══════════════════════════════════════════════════════
+   PAGE ENTRY ANIMATION — only the page wrapper fades in
+   (per-child stagger removed: caused layout instability)
+═══════════════════════════════════════════════════════ */
+
+/* page-fade class is applied to the page-content wrapper via key={page} in app.js */
+
+/* Page fade transition wrapper */
+.page-fade { animation: fadeUp 0.30s cubic-bezier(0.22,1,0.36,1) both; }
+
+/* ═══════════════════════════════════════════════════════
+   SKELETON SHIMMER OVERRIDE
+═══════════════════════════════════════════════════════ */
+
+.skeleton {
+  background:
+    linear-gradient(
+      90deg,
+      var(--panel, #101c2b)          0%,
+      rgba(255,255,255,0.065)        40%,
+      var(--panel, #101c2b)          80%
+    ) !important;
+  background-size: 700px 100% !important;
+  animation: shimmerWave 1.5s infinite linear !important;
+  border: none !important;
+  box-shadow: none !important;
+  color: transparent !important;
+  pointer-events: none;
+}
+
+/* ═══════════════════════════════════════════════════════
+   CARD HOVER GLOW
+═══════════════════════════════════════════════════════ */
+
+.card {
+  transition:
+    border-color  0.24s ease,
+    box-shadow    0.24s ease,
+    transform     0.24s cubic-bezier(0.4,0,0.2,1) !important;
+}
+
+/* Card hover — only glow, NO transform (keeps layout stable, fixes fault-modal shifting) */
+.page-content .card:hover {
+  border-color: rgba(62,183,223,0.20) !important;
+  box-shadow:
+    0 0 0 1px rgba(62,183,223,0.07),
+    0 12px 32px rgba(0,0,0,0.22) !important;
+}
+
+/* ═══════════════════════════════════════════════════════
+   KPI CARD PREMIUM HOVER
+═══════════════════════════════════════════════════════ */
+
+.kpi-card {
+  transition:
+    border-color  0.22s ease,
+    box-shadow    0.22s ease,
+    transform     0.22s cubic-bezier(0.4,0,0.2,1) !important;
+}
+
+/* KPI hover — glow only, no transform */
+.kpi-card:hover {
+  box-shadow:
+    0 0 0 1px rgba(62,183,223,0.16),
+    0 8px 24px rgba(0,0,0,0.22) !important;
+}
+
+.kpi-card--performance:hover {
+  border-color: rgba(62,183,223,0.30) !important;
+  box-shadow: 0 0 20px rgba(62,183,223,0.10), 0 8px 24px rgba(0,0,0,0.22) !important;
+}
+
+/* Animated counter pop */
+.kpi-value-animated {
+  display: inline-block;
+  animation: countPop 0.55s cubic-bezier(0.22,1,0.36,1) both;
+}
+
+/* ═══════════════════════════════════════════════════════
+   TOAST NOTIFICATION SYSTEM
+═══════════════════════════════════════════════════════ */
+
+.toast-container {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 99999;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  pointer-events: none;
+  max-width: 400px;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 280px;
+  max-width: 400px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.1);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  box-shadow: 0 8px 36px rgba(0,0,0,0.45);
+  pointer-events: all;
+  animation: toastSlideIn 0.38s cubic-bezier(0.22,1,0.36,1) both;
+  cursor: pointer;
+  font-family: var(--font,'Inter',sans-serif);
+  font-size: 13px;
+}
+
+.toast.toast-exit {
+  animation: toastSlideOut 0.30s ease forwards;
+}
+
+.toast-success { background: rgba(10,38,26,0.97); border-color: rgba(52,200,137,0.30); color: #d1fae5; }
+.toast-error   { background: rgba(38,10,10,0.97); border-color: rgba(235,107,107,0.30); color: #fee2e2; }
+.toast-info    { background: rgba(9,18,29,0.97);  border-color: rgba(62,183,223,0.30);  color: #e0f2fe; }
+.toast-warn    { background: rgba(38,28,8,0.97);  border-color: rgba(228,161,70,0.30);  color: #fef3c7; }
+
+.toast-icon {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 900;
+  margin-top: 1px;
+}
+.toast-success .toast-icon { background: rgba(52,200,137,0.20); color: #34c889; }
+.toast-error   .toast-icon { background: rgba(235,107,107,0.20); color: #eb6b6b; }
+.toast-info    .toast-icon { background: rgba(62,183,223,0.20);  color: #3eb7df; }
+.toast-warn    .toast-icon { background: rgba(228,161,70,0.20);  color: #e4a146; }
+
+.toast-body    { flex: 1; min-width: 0; }
+.toast-title   { font-weight: 700; line-height: 1.3; margin-bottom: 2px; }
+.toast-message { font-size: 12px; opacity: 0.82; line-height: 1.45; }
+
+/* ═══════════════════════════════════════════════════════
+   HERO STATUS BAR
+═══════════════════════════════════════════════════════ */
+
+/* Hero bar — uses CSS vars so it works on ALL themes (dark/light/vikram) */
+.plant-hero {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius,12px);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.hero-status-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: #34c889;
+  flex-shrink: 0;
+  animation: pulseStatusDot 2.6s ease infinite;
+}
+.hero-status-dot.offline { background: #eb6b6b; animation: none; }
+.hero-status-dot.warn    { background: #e4a146; animation: pulseWarnDot 2.6s ease infinite; }
+
+.hero-name {
+  font-family: var(--font-display,'Manrope',sans-serif);
+  font-size: 13px; font-weight: 800;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+/* Badge used for capacity, technology labels — adaptive to all themes */
+.hero-capacity-badge {
+  background: rgba(62,183,223,0.08);
+  border: 1px solid var(--line);
+  color: var(--accent);
+  font-size: 10px; font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.hero-divider {
+  width: 1px; height: 18px;
+  background: var(--line);
+  flex-shrink: 0;
+}
+
+.hero-metric { display: flex; flex-direction: column; gap: 2px; }
+
+.hero-metric-label {
+  font-size: 9px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.10em;
+  color: var(--text-muted);
+}
+
+.hero-metric-value {
+  font-size: 13px; font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.hero-metric-unit {
+  font-size: 10px; font-weight: 600;
+  color: var(--text-soft);
+}
+
+.hero-progress-wrap { flex: 1; min-width: 120px; }
+
+.hero-progress-label {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 5px;
+  font-size: 10px; font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+
+.hero-progress-bar {
+  height: 5px;
+  background: rgba(255,255,255,0.08);
+  border-radius: 999px; overflow: hidden;
+}
+
+.hero-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #3eb7df, #34c889);
+  border-radius: inherit;
+  transition: width 0.9s cubic-bezier(0.22,1,0.36,1);
+}
+
+/* ═══════════════════════════════════════════════════════
+   DATE PRESET BUTTONS
+═══════════════════════════════════════════════════════ */
+
+.date-presets {
+  display: flex; align-items: center; gap: 4px; flex-wrap: nowrap;
+}
+
+.date-preset-btn {
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-2, rgba(255,255,255,0.03));
+  color: var(--text-muted);
+  font-family: var(--font,'Inter',sans-serif);
+  font-size: 10px; font-weight: 700;
+  cursor: pointer; white-space: nowrap;
+  transition: all 0.14s ease;
+  line-height: 1.2;
+}
+.date-preset-btn:hover {
+  border-color: var(--accent);
+  background: rgba(62,183,223,0.06);
+  color: var(--text);
+}
+.date-preset-btn.active {
+  border-color: var(--accent);
+  background: rgba(62,183,223,0.12);
+  color: var(--accent); font-weight: 800;
+}
+
+/* ═══════════════════════════════════════════════════════
+   SIDEBAR ENHANCEMENTS
+═══════════════════════════════════════════════════════ */
+
+.sidebar-plant-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%; background: #34c889;
+  flex-shrink: 0;
+  animation: pulseStatusDot 3.2s ease infinite;
+}
+
+/* ═══════════════════════════════════════════════════════
+   SPINNER UPGRADE
+═══════════════════════════════════════════════════════ */
+
+.spinner {
+  display: inline-block !important;
+  width: 20px !important; height: 20px !important;
+  border: 2.5px solid rgba(62,183,223,0.18) !important;
+  border-top-color: var(--accent,#3eb7df) !important;
+  border-radius: 50% !important;
+  animation: spinnerRotate 0.72s linear infinite !important;
+  flex-shrink: 0 !important;
+  background: none !important;
+}
+
+/* ═══════════════════════════════════════════════════════
+   TOPBAR SUBTLE SHADOW
+═══════════════════════════════════════════════════════ */
+
+.topbar {
+  box-shadow:
+    0 1px 0 rgba(255,255,255,0.04),
+    0 4px 20px rgba(0,0,0,0.14) !important;
+}
+
+/* Table row transitions — hover only, no flicker animation on render */
+tbody tr {
+  transition: background 0.14s ease;
+}
+
+/* ═══════════════════════════════════════════════════════
+   ECHARTS DARK THEME OVERRIDES (tooltip injected by ECharts)
+═══════════════════════════════════════════════════════ */
+
+div.echarts-tooltip-container,
+div[style*="echarts"] {
+  font-family: var(--font,'Inter',sans-serif) !important;
+}
+
+/* ═══════════════════════════════════════════════════════
+   EMPTY STATE IMPROVEMENT
+═══════════════════════════════════════════════════════ */
+
+.empty-state {
+  display: flex !important;
+  flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 10px;
+  padding: 40px 20px;
+  color: var(--text-muted,#71849a);
+  font-size: 13px; font-weight: 600;
+  text-align: center;
+  min-height: 140px;
+}
+
+/* ═══════════════════════════════════════════════════════
+   BUTTON HOVER LIFT
+═══════════════════════════════════════════════════════ */
+
+.btn { transition: all 0.16s cubic-bezier(0.4,0,0.2,1) !important; }
+.btn:hover:not(:disabled) { transform: translateY(-1px) !important; }
+.btn:active:not(:disabled) { transform: translateY(0) !important; }
+
+/* ═══════════════════════════════════════════════════════
+   CARD HEADER IMPROVED
+═══════════════════════════════════════════════════════ */
+
+.card-title {
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.01em;
+}
+
+/* ═══════════════════════════════════════════════════════
+   AUTH PAGE GLASSMORPHISM POLISH
+═══════════════════════════════════════════════════════ */
+
+.auth-card {
+  backdrop-filter: blur(24px) !important;
+  -webkit-backdrop-filter: blur(24px) !important;
+}
+
+/* ═══════════════════════════════════════════════════════
+   ANALYTICS PAGE PANEL UPGRADE
+═══════════════════════════════════════════════════════ */
+
+.analytics-sidebar-panel {
+  background: rgba(16,28,43,0.98);
+  border: 1px solid var(--line,#223246);
+  border-radius: var(--radius-sm,10px);
+  overflow: hidden;
+}
+
+/* Availability bar glow */
+.avail-bar-fill {
+  background: linear-gradient(90deg, #3eb7df, #34c889) !important;
+  box-shadow: 0 0 10px rgba(62,183,223,0.22);
+}
+
+/* will-change removed — it created new stacking contexts that broke fault modal z-index */
+
+/* ═══════════════════════════════════════════════════════
+   MODAL BACKDROP — must paint above sidebar (sidebar has backdrop-filter
+   which creates isolated stacking context in Chrome/Edge).
+   These modals are portaled to document.body so they sit as direct body children.
+═══════════════════════════════════════════════════════ */
+
+.modal-backdrop,
+body > div[style*="position: fixed"][style*="z-index: 99999"],
+body > div[style*="position: fixed"][style*="z-index: 9999"] {
+  isolation: isolate !important;
+  z-index: 99999 !important;
+}

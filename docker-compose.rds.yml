@@ -1,0 +1,24 @@
+# Overlay for "DB lives outside compose" — e.g. AWS RDS, Cloud SQL, Neon.
+#
+# Usage:
+#   docker compose -f docker-compose.yml \
+#                  -f docker-compose.prod.yml \
+#                  -f docker-compose.rds.yml up -d --build
+#
+# Required .env keys in this mode:
+#   DATABASE_URL=postgresql://user:pass@<rds-host>:5432/solar
+#   DATABASE_URL_READ=postgresql://user:pass@<rds-host>:5432/solar
+#
+# Nightly backups in this mode are handled by RDS automated snapshots PLUS
+# a containerised pg_dump that writes to /backups on a schedule (see
+# scripts/backup_postgres.sh if you prefer off-box dumps to S3).
+
+services:
+  db: !reset null
+
+  backend:
+    depends_on: !reset [redis]
+    environment:
+      # Hard override any in-compose DB URL with the one from .env.
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set for RDS deploy}
+      DATABASE_URL_READ: ${DATABASE_URL_READ:-${DATABASE_URL}}

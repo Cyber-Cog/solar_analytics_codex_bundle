@@ -1,0 +1,49 @@
+# Version control
+.git
+.gitignore
+.github
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv
+venv
+env
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Node / JS tooling
+node_modules
+npm-debug.log
+yarn-error.log
+
+# Editor / OS
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Local artifacts we don't ship in images
+*.dump
+*.zip
+backups/
+tmp/
+tmp_*/
+scratch/
+local_db.dump
+
+# User data that lives on a mounted volume, not in the image
+backend/uploads/spec_sheets/**
+
+# Generated / template spreadsheets
+*.xlsx
+*.xls
+*.csv
+
+# Docs we don't need inside the runtime image
+*.md
+docs/

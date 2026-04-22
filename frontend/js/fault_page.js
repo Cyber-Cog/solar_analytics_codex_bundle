@@ -1,5 +1,5 @@
 const { useState, useEffect, useCallback, useMemo, useRef } = React;
-const { ResponsiveContainer, ComposedChart, LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ReferenceArea, ReferenceLine, Brush } = window.Recharts;
+const { ResponsiveContainer, ComposedChart, LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ReferenceArea, ReferenceLine, Brush } = window.Recharts || {};
 const { Card, Spinner, Badge, KpiCard, DataTable } = window;
 
 function parseScbSlotInfo(scbId) {

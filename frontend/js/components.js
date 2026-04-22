@@ -5,7 +5,7 @@ const {
   BarChart, Bar, LineChart, Line, ComposedChart,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine, Cell
-} = Recharts;
+} = window.Recharts || {};
 
 // ── Spinner ───────────────────────────────────────────────────────────────────
 window.Spinner = ({ size = 20 } = {}) => React.createElement('div', { 

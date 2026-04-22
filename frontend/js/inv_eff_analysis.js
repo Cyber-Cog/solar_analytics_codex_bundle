@@ -4,7 +4,7 @@ const { useState, useEffect, useMemo } = React;
 const { 
   ResponsiveContainer, ComposedChart, LineChart, Line, BarChart, Bar, XAxis, YAxis, 
   CartesianGrid, Tooltip, Legend, Cell, ErrorBar, Scatter, ReferenceLine, ReferenceArea, Brush
-} = Recharts;
+} = window.Recharts || {};
 const { Card, Spinner, KpiCard } = window;
 
 window.InverterEfficiencyAnalysis = ({ plantId, dateFrom, dateTo }) => {

@@ -570,6 +570,18 @@ const Admin = {
   deleteUser: (userId) => apiFetch(`/api/admin/users/${userId}`, { method: 'DELETE' }),
   deletePlant: (plantId) => apiFetch(`/api/admin/plants/${encodeURIComponent(plantId)}`, { method: 'DELETE' }),
   updateSiteAppearance: (data) => apiFetch('/api/admin/site-appearance', { method: 'PUT', body: JSON.stringify(data) }),
+  // ── Performance monitoring ──────────────────────────────────────────────
+  perfOverview: () => apiFetch('/api/admin/perf/overview'),
+  perfSlowQueries: (limit) => apiFetch(`/api/admin/perf/slow-queries?limit=${limit || 50}`),
+  perfEndpointStats: (minutes) => apiFetch(`/api/admin/perf/endpoint-stats?minutes=${minutes || 60}`),
+  perfDbHealth: () => apiFetch('/api/admin/perf/db-health'),
+  perfRequestLog: (limit, pathFilter) => {
+    let url = `/api/admin/perf/request-log?limit=${limit || 100}`;
+    if (pathFilter) url += `&path_filter=${encodeURIComponent(pathFilter)}`;
+    return apiFetch(url);
+  },
+  runPrecompute: () => apiFetch('/api/admin/perf/run-precompute', { method: 'POST' }),
+  precomputeStatus: () => apiFetch('/api/admin/perf/precompute-status'),
 };
 
 // ── Reports ───────────────────────────────────────────────────────────────────

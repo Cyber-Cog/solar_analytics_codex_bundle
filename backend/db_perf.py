@@ -72,6 +72,26 @@ _BG_INDEXES = [
     "ON plant_architecture (plant_id, inverter_id, scb_id)",
     "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_frs_plant_kind "
     "ON fault_runtime_snapshot (plant_id, kind)",
+    # ── Expression indexes to match LOWER(TRIM()) in WHERE clauses ─────────
+    # Without these, every dashboard / analytics query does a sequential scan.
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rdg_signal_lower "
+    "ON raw_data_generic (plant_id, (LOWER(TRIM(signal::text))))",
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rdg_equip_level_lower "
+    "ON raw_data_generic (plant_id, (LOWER(TRIM(equipment_level::text))))",
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rdg_level_signal_lower_ts "
+    "ON raw_data_generic (plant_id, (LOWER(TRIM(equipment_level::text))), (LOWER(TRIM(signal::text))), timestamp)",
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_dchd_level_signal_lower_ts "
+    "ON dc_hierarchy_derived (plant_id, (LOWER(TRIM(equipment_level::text))), (LOWER(TRIM(signal::text))), timestamp)",
+    # Covering index for the most common dashboard bundle pattern:
+    # WMS signals with value included to enable index-only scans
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rdg_wms_covering "
+    "ON raw_data_generic (plant_id, timestamp) INCLUDE (signal, value) "
+    "WHERE LOWER(TRIM(equipment_level::text)) IN ('plant', 'wms')",
+    # Covering index for inverter AC power (dashboard power-vs-gti)
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rdg_inv_ac_covering "
+    "ON raw_data_generic (plant_id, timestamp) INCLUDE (equipment_id, value) "
+    "WHERE LOWER(TRIM(equipment_level::text)) = 'inverter' "
+    "AND LOWER(TRIM(signal::text)) = 'ac_power'",
 ]
 
 _ANALYZE_TABLES = [

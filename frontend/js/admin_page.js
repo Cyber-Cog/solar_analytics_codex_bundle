@@ -1,4 +1,4 @@
-﻿/**
+/**
  * js/admin_page.js
  * =================
  * Admin-only page for User Management and RBAC Plant Mapping.
@@ -10,6 +10,8 @@ window.AdminPage = (props = {}) => {
   const h = React.createElement;
   const { Card, Badge, Modal, DataTable } = window;
 
+  const [activeTab, setActiveTab] = useState('users');
+  const [perfLoaded, setPerfLoaded] = useState(false);
   const [users, setUsers] = useState([]);
   const [plants, setPlants] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -302,17 +304,79 @@ window.AdminPage = (props = {}) => {
     },
   ];
 
+  // ── Lazy-load Performance panel ────────────────────────────────────────────
+  useEffect(() => {
+    if (activeTab === 'performance' && !perfLoaded && !window.PerfAdminPanel) {
+      if (window.__loadModule) {
+        window.__loadModule('AdminPerf').then(() => setPerfLoaded(true)).catch(() => setPerfLoaded(true));
+      } else {
+        setPerfLoaded(true);
+      }
+    }
+  }, [activeTab, perfLoaded]);
+
+  const TAB_DEFS = [
+    { id: 'users', label: 'Users & Access' },
+    { id: 'appearance', label: 'Appearance' },
+    { id: 'performance', label: '⚡ Performance' },
+  ];
+
+  const tabBarStyle = { display: 'flex', gap: 0, borderBottom: '1px solid var(--line)', marginBottom: 18 };
+  const tabStyle = (active) => ({
+    padding: '10px 18px', cursor: 'pointer', fontSize: 13, fontWeight: active ? 700 : 500,
+    color: active ? 'var(--accent)' : 'var(--text-muted)', borderBottom: active ? '2px solid var(--accent)' : '2px solid transparent',
+    background: 'none', border: 'none', borderRadius: 0, transition: 'color .15s',
+  });
+
   return h('div', null,
     h('div', { className:'page-header', style:{display:'flex', flexDirection:'row', justifyContent:'space-between', alignItems:'center', gap:12, flexWrap:'wrap'} },
       h('div', null,
-        h('h2', null, 'User & Access Management'),
-        h('p', null, 'Manage platform users and restrict their access to specific plants'),
+        h('h2', null, 'Admin Panel'),
+        h('p', null, 'Manage users, appearance, and monitor system performance'),
       ),
-      h('button', { className:'btn btn-primary', onClick: () => setShowCreate(true) }, 'Create New User')
+      activeTab === 'users' && h('button', { className:'btn btn-primary', onClick: () => setShowCreate(true) }, 'Create New User')
     ),
 
+    // Tab bar
+    h('div', { style: tabBarStyle },
+      TAB_DEFS.map(t => h('button', {
+        key: t.id, style: tabStyle(activeTab === t.id),
+        onClick: () => setActiveTab(t.id)
+      }, t.label))
+    ),
 
-    h(Card, { title: 'Organization appearance', style: { marginBottom: 16 } },
+    // ── Users & Access tab ──────────────────────────────────────────────────
+    activeTab === 'users' && h(React.Fragment, null,
+      h(Card, { title:`System Users (${users.length})` },
+        h(DataTable, {
+          columns: userColumns,
+          rows: users,
+          emptyMessage: 'No users found',
+          filename: 'system_users.csv',
+          maxHeight: 420,
+          initialSortKey: 'id',
+          compact: true,
+        })
+      ),
+
+      h(Card, { title:`Plants (${plants.length})`, style:{ marginTop: 16 } },
+        h('div', { style:{fontSize:12, color:'var(--text-muted)', marginBottom:10} },
+          'Admin-only permanent delete. This removes the plant and all related database records.'
+        ),
+        h(DataTable, {
+          columns: plantColumns,
+          rows: plants,
+          emptyMessage: 'No plants found',
+          filename: 'plants.csv',
+          maxHeight: 320,
+          initialSortKey: 'plant_id',
+          compact: true,
+        })
+      )
+    ),
+
+    // ── Appearance tab ──────────────────────────────────────────────────────
+    activeTab === 'appearance' && h(Card, { title: 'Organization appearance' },
       h('p', { style: { fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 } },
         'Choose the default theme for new visitors who have not picked a personal theme. Hover swatches to preview; click to select; Save applies for the organization.'),
       h('div', {
@@ -352,38 +416,22 @@ window.AdminPage = (props = {}) => {
       ),
       h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
         h('button', { className: 'btn btn-primary', disabled: appearanceSaving, onClick: saveOrgAppearance },
-          appearanceSaving ? 'Savingâ€¦' : 'Save organization default'),
+          appearanceSaving ? 'Saving…' : 'Save organization default'),
         h('span', { style: { fontSize: 11, color: 'var(--text-muted)' } }, 'Current draft: ' + appearanceDraft),
       ),
     ),
 
-    h(Card, { title:`System Users (${users.length})` },
-      h(DataTable, {
-        columns: userColumns,
-        rows: users,
-        emptyMessage: 'No users found',
-        filename: 'system_users.csv',
-        maxHeight: 420,
-        initialSortKey: 'id',
-        compact: true,
-      })
+    // ── Performance tab ─────────────────────────────────────────────────────
+    activeTab === 'performance' && (
+      window.PerfAdminPanel
+        ? h(window.PerfAdminPanel)
+        : h('div', { style: { padding: 40, textAlign: 'center', color: 'var(--text-muted)' } },
+            h('div', { className: 'loading-spinner', style: { margin: '0 auto 12px', width: 24, height: 24 } }),
+            'Loading performance module…'
+          )
     ),
 
-    h(Card, { title:`Plants (${plants.length})`, style:{ marginTop: 16 } },
-      h('div', { style:{fontSize:12, color:'var(--text-muted)', marginBottom:10} },
-        'Admin-only permanent delete. This removes the plant and all related database records.'
-      ),
-      h(DataTable, {
-        columns: plantColumns,
-        rows: plants,
-        emptyMessage: 'No plants found',
-        filename: 'plants.csv',
-        maxHeight: 320,
-        initialSortKey: 'plant_id',
-        compact: true,
-      })
-    ),
-
+    // ── Modals (Create / Edit) ──────────────────────────────────────────────
     showCreate && h(Modal, {
       title: 'Create New User',
       open: true,
@@ -404,7 +452,7 @@ window.AdminPage = (props = {}) => {
         ),
         h('div', { className:'form-group' },
           h('label', { className:'form-label' }, 'Password'),
-          h('input', { className:'form-input', type:'password', value:form.password, onChange:e=>setForm({...form, password:e.target.value}), placeholder:'â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢' })
+          h('input', { className:'form-input', type:'password', value:form.password, onChange:e=>setForm({...form, password:e.target.value}), placeholder:'••••••••' })
         ),
         h('div', { style:{display:'flex', alignItems:'center', gap:10, margin:'10px 0'} },
           h('input', { type:'checkbox', id:'is_admin', checked:form.is_admin, onChange:e=>setForm({...form, is_admin:e.target.checked}) }),

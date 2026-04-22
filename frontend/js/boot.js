@@ -37,9 +37,8 @@
   })();
   var cacheBust = '?v=' + ASSET_BUILD_ID + '_' + _sv;
 
-  var CDN_PROP_TYPES = 'https://unpkg.com/prop-types@15.8.1/prop-types.min.js';
+  // ECharts migration complete — Recharts + PropTypes removed to save ~200KB and 1-2s boot.
   var CDN_PARALLEL = [
-    'https://unpkg.com/recharts@2.13.3/umd/Recharts.js',
     'https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js',
     'https://unpkg.com/lucide@0.487.0/dist/umd/lucide.min.js',
   ];
@@ -59,11 +58,10 @@
   }
 
   function loadCdnChain() {
-    return injectExternalScript(CDN_PROP_TYPES).then(function () {
-      return Promise.all(CDN_PARALLEL.map(function (url) {
-        return injectExternalScript(url);
-      }));
-    });
+    // Load ECharts + Lucide in parallel (no sequential PropTypes dependency)
+    return Promise.all(CDN_PARALLEL.map(function (url) {
+      return injectExternalScript(url);
+    }));
   }
 
   var CORE_MODULES = [
@@ -84,6 +82,7 @@
     'Guidebook': ['js/guidebook_page.js'],
     'Metadata': ['js/plant_architecture_viz.js'],
     'Admin': ['js/admin_page.js'],
+    'AdminPerf': ['js/perf_admin.js'],
   };
 
   var _loaded = Object.create(null);

@@ -755,13 +755,87 @@ def dashboard_bundle(
         "plant_age_years": age, "location": plant.location if plant else None,
     }
 
-    # Inverter performance table keeps inverter-level PR.
-    inv_table = _inverter_performance_table(db, table, plant_id, f_ts, t_ts, _from, _to)
+    # ── Parallelize heavy queries ────────────────────────────────────────────
+    # Each task gets its own DB session so queries run truly concurrently.
+    from concurrent.futures import ThreadPoolExecutor
+    from database import SessionLocal
 
-    # KPIs + insolation
-    ac_sql = text(sql_plant_ac_totals(table))
-    ac = db.execute(ac_sql, {"plant_id": plant_id, "f": f_ts, "t": t_ts}).fetchone()
-    _ins_b = _wms_tilt_insolation_kwh_m2(db, table, plant_id, f_ts, t_ts)
+    params = {"plant_id": plant_id, "f": f_ts, "t": t_ts}
+
+    def _q_inv_table():
+        s = SessionLocal()
+        try:
+            return _inverter_performance_table(s, table, plant_id, f_ts, t_ts, _from, _to)
+        finally:
+            s.close()
+
+    def _q_ac_totals():
+        s = SessionLocal()
+        try:
+            return s.execute(text(sql_plant_ac_totals(table)), params).fetchone()
+        finally:
+            s.close()
+
+    def _q_insolation():
+        s = SessionLocal()
+        try:
+            return _wms_tilt_insolation_kwh_m2(s, table, plant_id, f_ts, t_ts)
+        finally:
+            s.close()
+
+    def _q_wms():
+        s = SessionLocal()
+        try:
+            return _wms_kpis_payload(s, table, plant_id, f_ts, t_ts)
+        finally:
+            s.close()
+
+    def _q_energy():
+        s = SessionLocal()
+        try:
+            return s.execute(text(sql_plant_ac_daily_energy(table)), {"plant_id": plant_id, "from_ts": f_ts, "to_ts": t_ts}).fetchall()
+        finally:
+            s.close()
+
+    def _q_pvg():
+        s = SessionLocal()
+        try:
+            pvg_lim = _power_vs_gti_row_limit(_from, _to)
+            return s.execute(text(_sql_power_vs_gti(table, pvg_lim)), params).fetchall()
+        finally:
+            s.close()
+
+    def _q_target_gen():
+        s = SessionLocal()
+        try:
+            lg_key = cache_key_loss_gen_snapshot(plant_id, _from, _to)
+            tg = fault_cache_get(s, lg_key, TTL_LOSS_GEN_SNAPSHOT_MIN)
+            if tg is None:
+                from routers.loss_analysis import compute_plant_expected_actual_mwh_for_range
+                tg = compute_plant_expected_actual_mwh_for_range(s, plant_id, _from, _to)
+                fault_cache_set(s, lg_key, tg)
+            return tg
+        finally:
+            s.close()
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        fut_inv = pool.submit(_q_inv_table)
+        fut_ac  = pool.submit(_q_ac_totals)
+        fut_ins = pool.submit(_q_insolation)
+        fut_wms = pool.submit(_q_wms)
+        fut_en  = pool.submit(_q_energy)
+        fut_pvg = pool.submit(_q_pvg)
+        fut_tg  = pool.submit(_q_target_gen)
+
+        inv_table = fut_inv.result()
+        ac        = fut_ac.result()
+        _ins_b    = fut_ins.result()
+        wms       = fut_wms.result()
+        en_rows   = fut_en.result()
+        pvg_rows  = fut_pvg.result()
+        target_generation = fut_tg.result()
+
+    # ── Assemble KPIs (same logic, now using parallel results) ─────────────
     insolation_kwh_m2 = round(_ins_b, 2) if _ins_b > 0 else None
     days = max(1, (datetime.strptime(_to[:10], "%Y-%m-%d") - datetime.strptime(_from[:10], "%Y-%m-%d")).days + 1)
     total_kwh = round(ac.total_kwh, 1) if ac and ac.total_kwh else None
@@ -778,21 +852,7 @@ def dashboard_bundle(
         "insolation_kwh_m2": insolation_kwh_m2,
     }
 
-    # WMS (same logic as /wms-kpis)
-    wms = _wms_kpis_payload(db, table, plant_id, f_ts, t_ts)
-
-    # Expected vs actual (MWh) — lightweight plant snapshot; persisted in fault_cache like other analytics
-    lg_key = cache_key_loss_gen_snapshot(plant_id, _from, _to)
-    target_generation = fault_cache_get(db, lg_key, TTL_LOSS_GEN_SNAPSHOT_MIN)
-    if target_generation is None:
-        from routers.loss_analysis import compute_plant_expected_actual_mwh_for_range
-
-        target_generation = compute_plant_expected_actual_mwh_for_range(db, plant_id, _from, _to)
-        fault_cache_set(db, lg_key, target_generation)
-
-    # Energy (daily) — integrate kW using actual timestamp spacing
-    en_sql = text(sql_plant_ac_daily_energy(table))
-    en_rows = db.execute(en_sql, {"plant_id": plant_id, "from_ts": f_ts, "to_ts": t_ts}).fetchall()
+    # Energy (daily)
     target_kwh = round(cap_kw * 4.5, 1) if cap_kw else None
     energy = [
         {
@@ -805,10 +865,7 @@ def dashboard_bundle(
         for r in en_rows
     ]
 
-    # Power vs GTI (enough rows for whole range; not truncated to 2000)
-    pvg_lim = _power_vs_gti_row_limit(_from, _to)
-    pvg_sql = text(_sql_power_vs_gti(table, pvg_lim))
-    pvg_rows = db.execute(pvg_sql, {"plant_id": plant_id, "f": f_ts, "t": t_ts}).fetchall()
+    # Power vs GTI
     power_gti = [
         {
             "timestamp": _as_json_str(r.timestamp),

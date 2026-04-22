@@ -68,6 +68,7 @@ from routers.admin      import router as admin_router
 from routers.loss_analysis import router as loss_analysis_router, router_dashboard_alias as loss_analysis_dashboard_router
 from routers.reports    import router as reports_router
 from routers.site      import router as site_router
+from routers.perf_monitor import router as perf_monitor_router
 
 
 def _ensure_equipment_spec_loss_columns():
@@ -283,13 +284,21 @@ async def solar_log_slow_requests(request: Request, call_next):
     response = await call_next(request)
     ms = (_time_slow.perf_counter() - t0) * 1000.0
     path = request.url.path
-    if path.startswith("/api") and ms >= 1500.0:
-        _solar_slow_log.warning(
-            "slow_api ms=%.0f path=%s status=%s",
-            ms,
-            path,
-            getattr(response, "status_code", "?"),
-        )
+    status = getattr(response, "status_code", 0)
+    # Feed ALL API request timings into the perf monitor for the admin dashboard
+    if path.startswith("/api"):
+        try:
+            from routers.perf_monitor import record_request_timing
+            record_request_timing(path, request.method, status, ms)
+        except Exception:
+            pass
+        if ms >= 1500.0:
+            _solar_slow_log.warning(
+                "slow_api ms=%.0f path=%s status=%s",
+                ms,
+                path,
+                status,
+            )
     return response
 
 app.add_middleware(GZipMiddleware, minimum_size=1024)
@@ -316,6 +325,7 @@ app.include_router(loss_analysis_router)
 app.include_router(loss_analysis_dashboard_router)
 app.include_router(admin_router)
 app.include_router(reports_router)
+app.include_router(perf_monitor_router)
 
 
 # ── Health Check ──────────────────────────────────────────────────────────────

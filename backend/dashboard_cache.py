@@ -20,7 +20,16 @@ from typing import Any, Optional
 
 log = logging.getLogger(__name__)
 
-_TTL_SECONDS = 180  # default TTL for dashboard responses
+_IS_SERVERLESS = os.environ.get("SOLAR_SERVERLESS", "").lower() in ("1", "true", "yes") or os.environ.get("VERCEL") == "1"
+# Longer TTL in serverless since the in-process cache dies with the function anyway.
+_TTL_SECONDS = 900 if _IS_SERVERLESS else 180
+
+# ── Performance stats (for admin perf monitor) ───────────────────────────────
+_cache_hits = 0
+_cache_misses = 0
+
+def get_cache_stats() -> dict:
+    return {"hits": _cache_hits, "misses": _cache_misses, "store_size": len(_store)}
 
 # ── In-process fallback ──────────────────────────────────────────────────────
 _lock = threading.Lock()
@@ -84,10 +93,17 @@ def _inproc_set(key: str, value: Any, ttl: int) -> None:
 
 # ── Public API (backwards compatible) ────────────────────────────────────────
 def get(prefix: str, plant_id: str, date_from: str, date_to: str) -> Any:
+    global _cache_hits, _cache_misses
     k = _key(prefix, plant_id, date_from, date_to)
     if _redis_client is not None:
-        return _redis_get(k)
-    return _inproc_get(k)
+        val = _redis_get(k)
+    else:
+        val = _inproc_get(k)
+    if val is not None:
+        _cache_hits += 1
+    else:
+        _cache_misses += 1
+    return val
 
 
 def set(prefix: str, plant_id: str, date_from: str, date_to: str, value: Any) -> None:

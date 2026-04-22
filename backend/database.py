@@ -12,7 +12,7 @@ import os
 from sqlalchemy import create_engine, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import NullPool, QueuePool
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 if not DATABASE_URL:
@@ -29,14 +29,34 @@ if not (DATABASE_URL.startswith("postgresql") or DATABASE_URL.startswith("postgr
 _ECHO = os.environ.get("SQL_ECHO", "").lower() in ("1", "true")
 _SERVERLESS = os.environ.get("SOLAR_SERVERLESS", "").lower() in ("1", "true", "yes") or os.environ.get("VERCEL") == "1"
 
+# Statement timeout (ms) — safety net so runaway queries don't consume the
+# entire Vercel function budget (default 60 s). Applies per-session.
+_STATEMENT_TIMEOUT_MS = int(os.environ.get("DB_STATEMENT_TIMEOUT_MS", "25000"))
+
 
 def _engine_kwargs(pool_size: int, max_overflow: int) -> dict:
     kwargs = {
         "echo": _ECHO,
         "pool_pre_ping": True,
+        # TCP keepalive so NAT gateways / EC2 don't drop idle connections
+        "connect_args": {
+            "options": f"-c statement_timeout={_STATEMENT_TIMEOUT_MS}",
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 5,
+        },
     }
     if _SERVERLESS:
-        kwargs["poolclass"] = NullPool
+        # Use a tiny QueuePool instead of NullPool.  Warm Vercel invocations
+        # reuse the existing TCP+SSL connection (~0 ms) instead of opening a
+        # fresh one every call (~300-800 ms to EC2). pool_size=1 means at most
+        # 1 idle connection is kept; max_overflow=2 allows brief bursts.
+        kwargs["poolclass"] = QueuePool
+        kwargs["pool_size"] = 1
+        kwargs["max_overflow"] = 2
+        kwargs["pool_recycle"] = 270  # recycle before Vercel's ~5 min freeze
+        kwargs["pool_timeout"] = 10
     else:
         kwargs["pool_size"] = pool_size
         kwargs["max_overflow"] = max_overflow

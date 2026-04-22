@@ -721,7 +721,7 @@ def dashboard_bundle(
     plant_id: str  = Query(...),
     date_from: str = Query(default=None),
     date_to: str   = Query(default=None),
-    db: Session    = Depends(get_db),
+    db: Session    = Depends(get_read_db),
     current_user: User = Depends(get_current_user),
 ):
     """

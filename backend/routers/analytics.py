@@ -322,54 +322,50 @@ def get_available_signals(
     from dashboard_cache import get_any, set_any
 
     level = _validate_level(level)
-    cache_key = f"analytics:signals:v2:{plant_id}:{level}"
+    cache_key = f"analytics:signals:v3:{plant_id}:{level}"
     cached = get_any(cache_key, 300)
     if cached is not None:
         return cached
 
     if level == "wms":
-        # Scope to the last year so the DISTINCT scan uses recent partitions
-        # / index ranges rather than full table history.
         sql = text("""
             SELECT DISTINCT signal FROM raw_data_generic
             WHERE plant_id = :plant_id
               AND LOWER(TRIM(equipment_level::text)) IN ('plant', 'wms')
-              AND timestamp >= :since
             ORDER BY signal
         """)
-        since = (date.today() - timedelta(days=365)).isoformat()
-        rows = db.execute(sql, {"plant_id": plant_id, "since": since}).fetchall()
+        try:
+            rows = db.execute(sql, {"plant_id": plant_id}).fetchall()
+        except Exception:
+            rows = []
         signals = [r[0] for r in rows if r[0]]
         out = {"signals": signals}
         set_any(cache_key, out, 300)
         return out
 
     if level == "inverter":
-        # Constrain lookback so the DISTINCT scan can use the BRIN / composite
-        # indexes and never has to touch partitions older than a year.
         sql = text("""
             SELECT DISTINCT signal
             FROM raw_data_generic
             WHERE plant_id = :plant_id
               AND LOWER(TRIM(equipment_level::text)) = 'inverter'
-              AND timestamp >= :since
             UNION
             SELECT DISTINCT signal
             FROM raw_data_generic
             WHERE plant_id = :plant_id
               AND LOWER(TRIM(equipment_level::text)) = 'scb'
-              AND timestamp >= :since
             UNION
             SELECT DISTINCT signal
             FROM dc_hierarchy_derived
             WHERE plant_id = :plant_id
               AND LOWER(TRIM(equipment_level::text)) = 'inverter'
-              AND timestamp >= :since
             ORDER BY signal
         """)
-        since = (date.today() - timedelta(days=365)).isoformat()
-        rows = db.execute(sql, {"plant_id": plant_id, "since": since}).fetchall()
-        out = {"signals": [r[0] for r in rows]}
+        try:
+            rows = db.execute(sql, {"plant_id": plant_id}).fetchall()
+        except Exception:
+            rows = []
+        out = {"signals": [r[0] for r in rows if r[0]]}
         set_any(cache_key, out, 300)
         return out
 
@@ -381,16 +377,16 @@ def get_available_signals(
             SELECT DISTINCT signal FROM raw_data_generic
             WHERE plant_id = :plant_id
               AND LOWER(TRIM(equipment_level::text)) = 'scb'
-              AND timestamp >= :since
             UNION
             SELECT DISTINCT signal FROM dc_hierarchy_derived
             WHERE plant_id = :plant_id
               AND LOWER(TRIM(equipment_level::text)) = 'scb'
-              AND timestamp >= :since
             ORDER BY signal
         """)
-        since = (date.today() - timedelta(days=365)).isoformat()
-        rows = db.execute(sql, {"plant_id": plant_id, "since": since}).fetchall()
+        try:
+            rows = db.execute(sql, {"plant_id": plant_id}).fetchall()
+        except Exception:
+            rows = []
         out = {"signals": [r[0] for r in rows if r[0]]}
         set_any(cache_key, out, 300)
         return out
@@ -400,11 +396,9 @@ def get_available_signals(
             SELECT DISTINCT signal FROM raw_data_generic
             WHERE plant_id = :plant_id
               AND LOWER(TRIM(equipment_level::text)) = 'string'
-              AND CAST(timestamp AS TIMESTAMP) >= :since
             UNION
             SELECT DISTINCT r.signal FROM raw_data_generic r
             WHERE r.plant_id = :plant_id
-              AND r.timestamp >= :since
               AND r.equipment_id IN (
                 SELECT DISTINCT string_id FROM plant_architecture
                 WHERE plant_id = :plant_id AND string_id IS NOT NULL
@@ -413,19 +407,19 @@ def get_available_signals(
             SELECT DISTINCT signal FROM dc_hierarchy_derived
             WHERE plant_id = :plant_id
               AND LOWER(TRIM(equipment_level::text)) = 'string'
-              AND CAST(timestamp AS TIMESTAMP) >= :since
             UNION
             SELECT DISTINCT d.signal FROM dc_hierarchy_derived d
             WHERE d.plant_id = :plant_id
-              AND d.timestamp >= :since
               AND d.equipment_id IN (
                 SELECT DISTINCT string_id FROM plant_architecture
                 WHERE plant_id = :plant_id AND string_id IS NOT NULL
               )
             ORDER BY signal
         """)
-        since = (date.today() - timedelta(days=365)).isoformat()
-        rows = db.execute(sql, {"plant_id": plant_id, "since": since}).fetchall()
+        try:
+            rows = db.execute(sql, {"plant_id": plant_id}).fetchall()
+        except Exception:
+            rows = []
         out = {"signals": [r[0] for r in rows if r[0]]}
         set_any(cache_key, out, 300)
         return out

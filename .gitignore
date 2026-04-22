@@ -55,3 +55,6 @@ desktop.ini
 # IDE
 .vscode/
 .idea/
+
+# Vercel build output
+public/

@@ -12,7 +12,7 @@ import re
 import traceback
 import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Query, Form
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import List, Optional, Sequence
@@ -23,6 +23,7 @@ from dashboard_cache import invalidate_plant as invalidate_dashboard_cache
 from models import PlantArchitecture, EquipmentSpec, RawDataGeneric, RawDataStats, PlantEquipment, User
 from schemas import ArchitectureRow, EquipmentSpecRow
 from auth.routes import get_current_user
+from blob_storage import blob_uploads_enabled, upload_bytes
 
 router = APIRouter(prefix="/api/metadata", tags=["Metadata"])
 
@@ -344,6 +345,8 @@ def download_spec_sheet(
     spec = db.query(EquipmentSpec).filter(EquipmentSpec.id == spec_id).first()
     if not spec or not spec.spec_sheet_path:
         raise HTTPException(status_code=404, detail="Spec sheet not found")
+    if spec.spec_sheet_path.startswith(("http://", "https://")):
+        return RedirectResponse(spec.spec_sheet_path)
     path = os.path.join(_BACKEND_DIR, spec.spec_sheet_path)
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="File not found")
@@ -367,17 +370,29 @@ def upload_spec_sheet(
     if not safe_name.lower().endswith((".pdf", ".xlsx", ".xls", ".doc", ".docx", ".png", ".jpg", ".jpeg")):
         safe_name += ".pdf"
     dir_path = os.path.join(_UPLOADS_DIR, spec.plant_id or "default")
-    os.makedirs(dir_path, exist_ok=True)
     rel_path = os.path.join("uploads", "spec_sheets", spec.plant_id or "default", f"{spec.equipment_id}_{safe_name}")
     abs_path = os.path.join(_BACKEND_DIR, rel_path)
     try:
         content = file.file.read()
-        with open(abs_path, "wb") as f:
-            f.write(content)
-        spec.spec_sheet_path = rel_path
+        is_serverless = os.environ.get("SOLAR_SERVERLESS", "").lower() in ("1", "true", "yes") or os.environ.get("VERCEL") == "1"
+        if is_serverless:
+            if not blob_uploads_enabled():
+                raise HTTPException(
+                    status_code=503,
+                    detail="Spec-sheet uploads on Vercel require ENABLE_BLOB_UPLOADS=1 and BLOB_READ_WRITE_TOKEN.",
+                )
+            blob_path = f"spec-sheets/{spec.plant_id or 'default'}/{spec.equipment_id}_{safe_name}"
+            spec.spec_sheet_path = upload_bytes(blob_path, content, file.content_type)
+        else:
+            os.makedirs(dir_path, exist_ok=True)
+            with open(abs_path, "wb") as f:
+                f.write(content)
+            spec.spec_sheet_path = rel_path
         db.commit()
-        return {"success": True, "spec_sheet_path": rel_path}
+        return {"success": True, "spec_sheet_path": spec.spec_sheet_path}
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(status_code=500, detail=str(e))
 
 

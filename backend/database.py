@@ -12,6 +12,7 @@ import os
 from sqlalchemy import create_engine, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 if not DATABASE_URL:
@@ -26,14 +27,25 @@ if not (DATABASE_URL.startswith("postgresql") or DATABASE_URL.startswith("postgr
     )
 
 _ECHO = os.environ.get("SQL_ECHO", "").lower() in ("1", "true")
+_SERVERLESS = os.environ.get("SOLAR_SERVERLESS", "").lower() in ("1", "true", "yes") or os.environ.get("VERCEL") == "1"
+
+
+def _engine_kwargs(pool_size: int, max_overflow: int) -> dict:
+    kwargs = {
+        "echo": _ECHO,
+        "pool_pre_ping": True,
+    }
+    if _SERVERLESS:
+        kwargs["poolclass"] = NullPool
+    else:
+        kwargs["pool_size"] = pool_size
+        kwargs["max_overflow"] = max_overflow
+    return kwargs
 
 # ── Write pool (ingests, schema changes, admin mutations) ────────────────────
 engine = create_engine(
     DATABASE_URL,
-    echo=_ECHO,
-    pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
+    **_engine_kwargs(pool_size=10, max_overflow=20),
 )
 
 # ── Read pool (dashboard / analytics / fault pages) ──────────────────────────
@@ -47,10 +59,7 @@ _READ_MAX_OVERFLOW = int(os.environ.get("DB_READ_MAX_OVERFLOW", "20"))
 
 read_engine = create_engine(
     _READ_URL,
-    echo=_ECHO,
-    pool_pre_ping=True,
-    pool_size=_READ_POOL_SIZE,
-    max_overflow=_READ_MAX_OVERFLOW,
+    **_engine_kwargs(pool_size=_READ_POOL_SIZE, max_overflow=_READ_MAX_OVERFLOW),
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

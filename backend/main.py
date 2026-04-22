@@ -43,6 +43,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response
 
 FRONTEND_DIR = os.path.join(os.path.dirname(BACKEND_DIR), "frontend")
+IS_SERVERLESS = os.environ.get("SOLAR_SERVERLESS", "").lower() in ("1", "true", "yes") or os.environ.get("VERCEL") == "1"
 
 from database import engine, Base, SessionLocal
 from db_perf import ensure_performance_objects, ensure_performance_objects_bg
@@ -132,7 +133,9 @@ def _run_boot_migrations() -> None:
             raise
 
 
-if _MIGRATIONS_MODE == "skip":
+if IS_SERVERLESS:
+    print("[migrations] skipped at boot in serverless mode")
+elif _MIGRATIONS_MODE == "skip":
     print("[migrations] skipped at boot (SOLAR_MIGRATIONS_ON_BOOT=skip)")
 elif _MIGRATIONS_MODE == "blocking":
     _run_boot_migrations()
@@ -146,7 +149,8 @@ else:
     _mig_thread.start()
     print("[migrations] started in background; uvicorn continuing startup")
 
-ensure_performance_objects(engine)
+if not IS_SERVERLESS:
+    ensure_performance_objects(engine)
 
 
 def _background_warmup():
@@ -250,7 +254,8 @@ def _background_warmup():
         pass
 
 
-threading.Thread(target=_background_warmup, daemon=True, name="cache-warmup").start()
+if not IS_SERVERLESS:
+    threading.Thread(target=_background_warmup, daemon=True, name="cache-warmup").start()
 
 # ── FastAPI App ───────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -316,5 +321,14 @@ async def static_cache_headers(request: Request, call_next):
 
 
 # Mount static files AFTER all API routes so /docs and /api/* still work
-if os.path.isdir(FRONTEND_DIR):
+if os.path.isdir(FRONTEND_DIR) and not IS_SERVERLESS:
     app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+
+
+if IS_SERVERLESS:
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def serve_spa_fallback(full_path: str):
+        index = os.path.join(FRONTEND_DIR, "index.html")
+        if os.path.isfile(index):
+            return FileResponse(index)
+        return Response(status_code=404)

@@ -80,8 +80,11 @@ def _ensure_equipment_spec_loss_columns():
 
 
 # ── Create all tables on startup (safe: only creates if not exists) ───────────
-Base.metadata.create_all(bind=engine)
-_ensure_equipment_spec_loss_columns()
+# Skip schema writes in serverless mode. Vercel Functions should boot fast and
+# should not depend on running DDL successfully during module import.
+if not IS_SERVERLESS:
+    Base.metadata.create_all(bind=engine)
+    _ensure_equipment_spec_loss_columns()
 
 # ── Apply pending SAFE migrations (migrations/sql/*.sql) ──────────────────────
 # Risky migrations (type changes, partitioning) live under migrations/manual/

@@ -23,7 +23,6 @@ from dashboard_cache import invalidate_plant as invalidate_dashboard_cache
 from models import PlantArchitecture, EquipmentSpec, RawDataGeneric, RawDataStats, PlantEquipment, User
 from schemas import ArchitectureRow, EquipmentSpecRow
 from auth.routes import get_current_user
-from blob_storage import blob_uploads_enabled, upload_bytes
 
 router = APIRouter(prefix="/api/metadata", tags=["Metadata"])
 
@@ -376,6 +375,7 @@ def upload_spec_sheet(
         content = file.file.read()
         is_serverless = os.environ.get("SOLAR_SERVERLESS", "").lower() in ("1", "true", "yes") or os.environ.get("VERCEL") == "1"
         if is_serverless:
+            from blob_storage import blob_uploads_enabled, upload_bytes
             if not blob_uploads_enabled():
                 raise HTTPException(
                     status_code=503,

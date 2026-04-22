@@ -357,7 +357,7 @@ def get_available_signals(
             SELECT DISTINCT signal
             FROM raw_data_generic
             WHERE plant_id = :plant_id
-              AND equipment_level = 'scb'
+              AND LOWER(TRIM(equipment_level::text)) = 'scb'
               AND timestamp >= :since
             UNION
             SELECT DISTINCT signal

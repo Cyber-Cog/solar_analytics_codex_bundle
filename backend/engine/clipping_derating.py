@@ -86,7 +86,7 @@ _SQL_INV_AC = text("""
     SELECT timestamp, equipment_id AS inverter_id, value AS ac_kw
     FROM raw_data_generic
     WHERE plant_id = :p
-      AND equipment_level = 'inverter'
+      AND LOWER(TRIM(equipment_level::text)) = 'inverter'
       AND signal = 'ac_power'
       AND timestamp >= :f AND timestamp <= :t
 """)

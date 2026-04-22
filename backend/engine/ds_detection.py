@@ -262,7 +262,7 @@ def run_ds_detection(plant_id: str, df: pd.DataFrame, db: Session):
                         "SELECT timestamp, equipment_id, value "
                         "FROM raw_data_generic "
                         "WHERE plant_id = :p "
-                        "  AND equipment_level = 'inverter' "
+                        "  AND LOWER(TRIM(equipment_level::text)) = 'inverter' "
                         "  AND signal = 'dc_voltage' "
                         "  AND timestamp >= :f AND timestamp <= :t"
                     ),

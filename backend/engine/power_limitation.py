@@ -34,7 +34,7 @@ _SQL_INV = text(f"""
     SELECT timestamp, equipment_id AS inverter_id, AVG(value) AS ac_kw
     FROM raw_data_generic
     WHERE plant_id = :p
-      AND equipment_level = 'inverter'
+      AND LOWER(TRIM(equipment_level::text)) = 'inverter'
       AND signal = 'ac_power'
       AND timestamp >= :f AND timestamp <= :t
       {_SQL_PL_TIME}

@@ -320,15 +320,8 @@ async def static_cache_headers(request: Request, call_next):
     return response
 
 
-# Mount static files AFTER all API routes so /docs and /api/* still work
-if os.path.isdir(FRONTEND_DIR) and not IS_SERVERLESS:
+# Mount static files AFTER all API routes so /docs and /api/* still work.
+# We keep this enabled in serverless too, because Vercel Services mode can ship
+# the frontend files alongside the FastAPI service.
+if os.path.isdir(FRONTEND_DIR):
     app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
-
-
-if IS_SERVERLESS:
-    @app.get("/{full_path:path}", include_in_schema=False)
-    def serve_spa_fallback(full_path: str):
-        index = os.path.join(FRONTEND_DIR, "index.html")
-        if os.path.isfile(index):
-            return FileResponse(index)
-        return Response(status_code=404)

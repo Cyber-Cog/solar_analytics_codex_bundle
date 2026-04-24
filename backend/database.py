@@ -30,8 +30,12 @@ _ECHO = os.environ.get("SQL_ECHO", "").lower() in ("1", "true")
 _SERVERLESS = os.environ.get("SOLAR_SERVERLESS", "").lower() in ("1", "true", "yes") or os.environ.get("VERCEL") == "1"
 
 # Statement timeout (ms) — safety net so runaway queries don't consume the
-# entire Vercel function budget (default 60 s). Applies per-session.
-_STATEMENT_TIMEOUT_MS = int(os.environ.get("DB_STATEMENT_TIMEOUT_MS", "25000"))
+# entire Vercel function budget. Applies per-session on every DB connection.
+# Large on-prem / RDS plants (wide date ranges) often need 2–5+ minutes for first
+# fault/loss/snapshot compute before caches exist. Vercel stays at 25s; self-hosted
+# default is 5 minutes unless DB_STATEMENT_TIMEOUT_MS is set in .env.
+_DEFAULT_STMT_MS = "25000" if _SERVERLESS else "300000"
+_STATEMENT_TIMEOUT_MS = int(os.environ.get("DB_STATEMENT_TIMEOUT_MS", _DEFAULT_STMT_MS))
 
 
 def _engine_kwargs(pool_size: int, max_overflow: int) -> dict:

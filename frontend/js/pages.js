@@ -1,8 +1,6 @@
 // frontend/js/pages.js  - UAT-fixed version
 // Fixed: File upload in Metadata, auth-safe template download,
-//        onboarding banners on Dashboard & Analytics, better empty states
 const { useState, useEffect, useCallback } = React;
-const { BarChart, Bar, LineChart, Line, ComposedChart, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } = window.Recharts || {};
 
 // ── Shared upload helper (multipart/form-data with JWT) ───────────────────────
 async function uploadExcel(endpoint, file) {

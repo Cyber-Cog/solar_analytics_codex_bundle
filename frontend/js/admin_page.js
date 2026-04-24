@@ -34,6 +34,17 @@ window.AdminPage = (props = {}) => {
   const [appearanceDraft, setAppearanceDraft] = useState(() => orgDefaultTheme || 'dark_ocean');
   const [appearanceSaving, setAppearanceSaving] = useState(false);
 
+  const [precomputeQ, setPrecomputeQ] = useState(null);
+  const [precomputeForm, setPrecomputeForm] = useState({
+    allPlants: true,
+    plantId: '',
+    dateFrom: '',
+    dateTo: '',
+    chunkDays: 62,
+  });
+  const [precomputeLoading, setPrecomputeLoading] = useState(false);
+  const [precomputeEnqueuing, setPrecomputeEnqueuing] = useState(false);
+
   useEffect(() => {
     setAppearanceDraft(orgDefaultTheme || 'dark_ocean');
   }, [orgDefaultTheme]);
@@ -304,6 +315,45 @@ window.AdminPage = (props = {}) => {
     },
   ];
 
+  const loadPrecomputeQueue = () => {
+    if (!window.SolarAPI.Admin.precomputeQueue) return;
+    setPrecomputeLoading(true);
+    window.SolarAPI.Admin.precomputeQueue()
+      .then((r) => setPrecomputeQ(r))
+      .catch((e) => { console.error(e); setPrecomputeQ({ error: e && (e.message || String(e)) }); })
+      .finally(() => setPrecomputeLoading(false));
+  };
+
+  useEffect(() => {
+    if (activeTab === 'precompute') loadPrecomputeQueue();
+  }, [activeTab]);
+
+  const handlePrecomputeEnqueue = async () => {
+    if (!precomputeForm.allPlants && !String(precomputeForm.plantId || '').trim()) {
+      return alert('Choose a plant or check “All plants”.');
+    }
+    if (!window.SolarAPI.Admin.precomputeEnqueue) {
+      return alert('Update the app: precompute API not available.');
+    }
+    setPrecomputeEnqueuing(true);
+    try {
+      const body = {
+        plant_id: precomputeForm.allPlants ? null : String(precomputeForm.plantId || '').trim(),
+        date_from: String(precomputeForm.dateFrom || '').trim() || null,
+        date_to: String(precomputeForm.dateTo || '').trim() || null,
+        chunk_days: Math.max(0, parseInt(precomputeForm.chunkDays, 10) || 0),
+      };
+      const r = await window.SolarAPI.Admin.precomputeEnqueue(body);
+      const msg = `Enqueued ${r.jobs_enqueued} job(s) for: ${(r.plants_touched || []).join(', ') || '—'}\n\n${r.worker_hint || ''}`;
+      alert(msg);
+      loadPrecomputeQueue();
+    } catch (e) {
+      alert((e && (e.message || e.detail)) ? (e.message || e.detail) : String(e));
+    } finally {
+      setPrecomputeEnqueuing(false);
+    }
+  };
+
   // ── Lazy-load Performance panel ────────────────────────────────────────────
   useEffect(() => {
     if (activeTab === 'performance' && !perfLoaded && !window.PerfAdminPanel) {
@@ -318,6 +368,7 @@ window.AdminPage = (props = {}) => {
   const TAB_DEFS = [
     { id: 'users', label: 'Users & Access' },
     { id: 'appearance', label: 'Appearance' },
+    { id: 'precompute', label: 'Analytics precompute' },
     { id: 'performance', label: '⚡ Performance' },
   ];
 
@@ -332,7 +383,7 @@ window.AdminPage = (props = {}) => {
     h('div', { className:'page-header', style:{display:'flex', flexDirection:'row', justifyContent:'space-between', alignItems:'center', gap:12, flexWrap:'wrap'} },
       h('div', null,
         h('h2', null, 'Admin Panel'),
-        h('p', null, 'Manage users, appearance, and monitor system performance'),
+        h('p', null, 'Manage users, appearance, backfill analytics caches, and monitor performance'),
       ),
       activeTab === 'users' && h('button', { className:'btn btn-primary', onClick: () => setShowCreate(true) }, 'Create New User')
     ),
@@ -419,6 +470,81 @@ window.AdminPage = (props = {}) => {
           appearanceSaving ? 'Saving…' : 'Save organization default'),
         h('span', { style: { fontSize: 11, color: 'var(--text-muted)' } }, 'Current draft: ' + appearanceDraft),
       ),
+    ),
+
+    // ── Analytics precompute (historical + manual repair) ─────────────────
+    activeTab === 'precompute' && h(React.Fragment, null,
+      h(Card, { title: 'Durable precompute queue' },
+        h('p', { style: { fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 } },
+          'Fills module snapshot tables (DS summary, unified fault feed, loss bridge) and warms fault tab caches for the selected date range. ' +
+          'If automatic precompute after upload fails, use this. Leave dates empty to use each plant’s raw data min/max. ' +
+          'Set chunk size (e.g. 62 days) to split long history into many small jobs so the background worker can finish them reliably.'
+        ),
+        h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center', marginBottom: 12 } },
+          h('label', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' } },
+            h('input', { type: 'checkbox', checked: precomputeForm.allPlants, onChange: (e) => setPrecomputeForm({ ...precomputeForm, allPlants: e.target.checked }) }),
+            'All plants'
+          ),
+          !precomputeForm.allPlants && h('select', {
+            className: 'form-input',
+            style: { minWidth: 200 },
+            value: precomputeForm.plantId,
+            onChange: (e) => setPrecomputeForm({ ...precomputeForm, plantId: e.target.value }),
+          },
+            h('option', { value: '' }, '— select plant —'),
+            (plants || []).map((p) => h('option', { key: p.plant_id, value: p.plant_id }, p.plant_id))
+          ),
+        ),
+        h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 10, marginBottom: 10 } },
+          h('div', { className: 'form-group' },
+            h('label', { className: 'form-label' }, 'From (optional)'),
+            h('input', { className: 'form-input', type: 'date', value: precomputeForm.dateFrom, onChange: (e) => setPrecomputeForm({ ...precomputeForm, dateFrom: e.target.value }) }),
+          ),
+          h('div', { className: 'form-group' },
+            h('label', { className: 'form-label' }, 'To (optional)'),
+            h('input', { className: 'form-input', type: 'date', value: precomputeForm.dateTo, onChange: (e) => setPrecomputeForm({ ...precomputeForm, dateTo: e.target.value }) }),
+          ),
+          h('div', { className: 'form-group' },
+            h('label', { className: 'form-label' }, 'Chunk (days)'),
+            h('input', {
+              className: 'form-input',
+              type: 'number',
+              min: 0,
+              max: 366,
+              value: precomputeForm.chunkDays,
+              onChange: (e) => setPrecomputeForm({ ...precomputeForm, chunkDays: e.target.value }),
+            }),
+            h('div', { style: { fontSize: 10, color: 'var(--text-muted)' } }, '0 = one job for full range'),
+          ),
+        ),
+        h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' } },
+          h('button', { className: 'btn btn-primary', disabled: precomputeEnqueuing, onClick: handlePrecomputeEnqueue },
+            precomputeEnqueuing ? 'Enqueueing…' : 'Enqueue precompute jobs'),
+          h('button', { className: 'btn btn-outline', type: 'button', disabled: precomputeLoading, onClick: loadPrecomputeQueue },
+            precomputeLoading ? 'Refreshing…' : 'Refresh queue'),
+        ),
+        precomputeQ && precomputeQ.error && h('p', { style: { color: 'var(--solar-red)', fontSize: 12, marginTop: 10 } }, String(precomputeQ.error)),
+        precomputeQ && !precomputeQ.error && h('div', { style: { marginTop: 14, fontSize: 12 } },
+          h('div', { style: { marginBottom: 6 } },
+            h('strong', null, 'Pending: '),
+            String(precomputeQ.pending != null ? precomputeQ.pending : '—'),
+            '  ',
+            h('strong', null, 'Running: '),
+            String(precomputeQ.running != null ? precomputeQ.running : '—'),
+          ),
+          precomputeQ.worker_hint && h('p', { style: { color: 'var(--text-muted)', fontFamily: 'ui-monospace,monospace', fontSize: 11, whiteSpace: 'pre-wrap' } }, precomputeQ.worker_hint),
+          (precomputeQ.recent_jobs && precomputeQ.recent_jobs.length > 0) && h('div', { style: { marginTop: 10, maxHeight: 280, overflow: 'auto' } },
+            h('div', { style: { fontWeight: 600, marginBottom: 6 } }, 'Recent jobs'),
+            (precomputeQ.recent_jobs || []).map((j) => h('div', {
+              key: j.id,
+              style: { fontSize: 11, borderBottom: '1px solid var(--line)', padding: '6px 0', color: 'var(--text)' },
+            },
+              h('div', null, h('code', null, j.plant_id), '  ', h(Badge, { type: j.status === 'done' ? 'green' : (j.status === 'failed' ? 'red' : 'amber') }, j.status || '')),
+              h('div', { style: { color: 'var(--text-muted)' } }, (j.date_from || '') + ' → ' + (j.date_to || ''), (j.error_message ? ' — ' + j.error_message : '')),
+            )),
+          ),
+        ),
+      )
     ),
 
     // ── Performance tab ─────────────────────────────────────────────────────

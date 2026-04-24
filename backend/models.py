@@ -8,7 +8,7 @@ table is added here to support authentication and multi-plant selection.
 """
 
 from sqlalchemy import (
-    Column, Integer, String, Float, Text,
+    Column, Integer, BigInteger, String, Float, Text,
     DateTime, Boolean, ForeignKey, UniqueConstraint, Index
 )
 from sqlalchemy.orm import relationship
@@ -308,4 +308,107 @@ class FaultRuntimeSnapshot(Base):
     __table_args__ = (
         UniqueConstraint("plant_id", "date_from", "date_to", "kind", name="uq_fault_runtime_snapshot"),
         Index("idx_fault_rt_snap_plant_updated", "plant_id", "updated_at"),
+    )
+
+
+# ── Module snapshots (invalid when raw_data_stats.updated_at is newer) ────────
+# Populated after raw-data ingest (background) and on first API miss. Keeps
+# heavy aggregates off the request path. Apply schema only to the DB in DATABASE_URL
+# (e.g. AWS RDS), not a shared local Postgres used by another app.
+
+
+class DsSummarySnapshot(Base):
+    """Cached JSON for `/api/faults/ds-summary` per plant + date range."""
+
+    __tablename__ = "ds_summary_snapshot"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    plant_id = Column(String, nullable=False, index=True)
+    date_from = Column(String(32), nullable=False, default="")
+    date_to = Column(String(32), nullable=False, default="")
+    payload_json = Column(Text, nullable=False)
+    computed_at = Column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("plant_id", "date_from", "date_to", name="uq_ds_summary_snapshot"),
+    )
+
+
+class UnifiedFaultSnapshot(Base):
+    """Cached JSON for `/api/faults/unified-feed` (categories + rows + totals)."""
+
+    __tablename__ = "unified_fault_snapshot"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    plant_id = Column(String, nullable=False, index=True)
+    date_from = Column(String(32), nullable=False)
+    date_to = Column(String(32), nullable=False)
+    payload_json = Column(Text, nullable=False)
+    computed_at = Column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("plant_id", "date_from", "date_to", name="uq_unified_fault_snapshot"),
+    )
+
+
+class LossAnalysisSnapshot(Base):
+    """Cached JSON for loss-analysis `/bridge` (one scope + optional equipment)."""
+
+    __tablename__ = "loss_analysis_snapshot"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    plant_id = Column(String, nullable=False, index=True)
+    date_from = Column(String(32), nullable=False)
+    date_to = Column(String(32), nullable=False)
+    scope = Column(String(16), nullable=False, default="plant")
+    equipment_id = Column(String(512), nullable=False, default="")
+    payload_json = Column(Text, nullable=False)
+    computed_at = Column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint(
+            "plant_id", "date_from", "date_to", "scope", "equipment_id",
+            name="uq_loss_analysis_snapshot",
+        ),
+    )
+
+
+class PlantComputeStatus(Base):
+    """Last background module precompute for a plant (for Metadata UI status)."""
+
+    __tablename__ = "plant_compute_status"
+
+    plant_id = Column(String, primary_key=True)
+    status = Column(String(32), nullable=False, default="idle")  # idle|running|done|error
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    duration_seconds = Column(Integer, nullable=True)
+    error_message = Column(Text, nullable=True)
+    last_range_json = Column(Text, nullable=True)  # JSON: {"date_from","date_to"}
+
+
+class PrecomputeJob(Base):
+    """
+    Durable queue for module snapshot recompute (`python -m jobs.precompute_runner`).
+    Pending rows for the same plant are merged (expanded date range) on enqueue.
+    """
+
+    __tablename__ = "precompute_jobs"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    plant_id = Column(String, nullable=False, index=True)
+    date_from = Column(String(32), nullable=False)
+    date_to = Column(String(32), nullable=False)
+    status = Column(String(16), nullable=False, default="pending")  # pending|running|done|failed
+    attempts = Column(Integer, nullable=False, default=0)
+    max_attempts = Column(Integer, nullable=False, default=5)
+    worker_id = Column(String(64), nullable=True)
+    locked_at = Column(DateTime, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        Index("idx_precompute_jobs_status_created", "status", "created_at"),
+        Index("idx_precompute_jobs_plant_status", "plant_id", "status"),
     )

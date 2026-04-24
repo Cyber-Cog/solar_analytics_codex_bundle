@@ -178,13 +178,15 @@ if __name__ == "__main__":
 
     sys.path.insert(0, str(_MIGRATIONS_DIR.parent))
     # Load env the same way main.py does
+    # Force backend/.env over inherited shell vars so CLI hits the same DB as the app
+    # (setdefault breaks when a broken DATABASE_URL is already exported, e.g. truncated).
     _env_path = _MIGRATIONS_DIR.parent / ".env"
     if _env_path.is_file():
         for line in _env_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, _, v = line.partition("=")
-                os.environ.setdefault(k.strip(), v.strip())
+                os.environ[k.strip()] = v.strip()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 

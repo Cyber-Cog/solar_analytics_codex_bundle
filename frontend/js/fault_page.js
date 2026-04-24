@@ -1,6 +1,11 @@
+console.info('[solar-trace] fault_page.js starting initialization');
 const { useState, useEffect, useCallback, useMemo, useRef } = React;
-const { ResponsiveContainer, ComposedChart, LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ReferenceArea, ReferenceLine, Brush } = window.Recharts || {};
+// Recharts explicitly removed during ECharts migration
 const { Card, Spinner, Badge, KpiCard, DataTable } = window;
+
+if (!Card || !Spinner || !DataTable) {
+  console.error('[solar-error] Critical UI components missing at fault_page.js load time', { Card, Spinner, DataTable });
+}
 
 function parseScbSlotInfo(scbId) {
   const match = String(scbId || '').match(/^SCB-([^-]+)-(\d+)$/i);
@@ -158,7 +163,8 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
   const dsReqSeqRef = useRef(0);
 
   const [unifiedFeed, setUnifiedFeed] = useState(null);
-  const [unifiedLoading, setUnifiedLoading] = useState(false);
+  /** Start true so Overview first paint shows loading, not a blank gap before the effect runs. */
+  const [unifiedLoading, setUnifiedLoading] = useState(true);
   const [unifiedErr, setUnifiedErr] = useState(null);
   const [metricToggle, setMetricToggle] = useState('mwh');
   const [ufEquipQ, setUfEquipQ] = useState('');
@@ -174,7 +180,12 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
   }, [pFrom, pTo]);
 
   useEffect(() => {
-    if (!plantId || !dateFrom || !dateTo) return undefined;
+    if (!plantId || !dateFrom || !dateTo) {
+      setUnifiedLoading(false);
+      setUnifiedFeed(null);
+      setUnifiedErr(null);
+      return undefined;
+    }
     let cancelled = false;
     setUnifiedLoading(true);
     setUnifiedErr(null);
@@ -1005,7 +1016,9 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
       )
     ),
 
-    subView === 'inv_eff' && h(window.InverterEfficiencyAnalysis, { plantId, dateFrom, dateTo }),
+    subView === 'inv_eff' && (window.InverterEfficiencyAnalysis 
+      ? h(window.InverterEfficiencyAnalysis, { plantId, dateFrom, dateTo })
+      : h('div', { className: 'empty-state', style: { padding: 40 } }, 'Inverter Efficiency module could not be loaded. Please refresh.')),
 
     subView === 'pl' && h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16 } },
       plLoading && h('div', { style: { padding: 24, textAlign: 'center', color: 'var(--text-soft)' } }, h(Spinner), ' Loading power limitation data…'),
@@ -1037,15 +1050,19 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
         })
       ),
       !plLoading && plSummary && (plSummary.inverters || []).length > 0 && h(Card, { title: 'Generation Loss by Inverter (Power Limitation)' },
-        h(ResponsiveContainer, { width: '100%', height: 300 },
-          h(BarChart, { data: plSummary.inverters || [], margin: { top: 10, right: 10, left: 0, bottom: 0 } },
-            h(CartesianGrid, { strokeDasharray: '3 3', stroke: '#F1F5F9' }),
-            h(XAxis, { dataKey: 'inverter_id', tick: { fontSize: 10 } }),
-            h(YAxis, { tick: { fontSize: 10 } }),
-            h(Tooltip),
-            h(Bar, { dataKey: 'energy_loss_kwh', fill: '#f59e0b', name: 'Energy Loss (kWh)' })
-          )
-        )
+        (()=>{
+          const data = plSummary.inverters || [];
+          return h(window.EChart, {
+            style: { width: '100%', height: 300 },
+            option: {
+              tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+              grid: { top: 10, right: 10, left: 40, bottom: 24 },
+              xAxis: { type: 'category', data: data.map(d=>d.inverter_id), axisLabel: { fontSize: 10, color: 'var(--text-soft)' }, axisLine: { lineStyle: { color: 'var(--line)' } }, axisTick: {show:false} },
+              yAxis: { type: 'value', axisLabel: { fontSize: 10, color: 'var(--text-soft)' }, splitLine: { lineStyle: { type: 'dashed', color: 'var(--line)' } } },
+              series: [{ type: 'bar', name: 'Energy Loss (kWh)', data: data.map(d=>d.energy_loss_kwh), itemStyle: { color: '#f59e0b', borderRadius: [4,4,0,0] } }]
+            }
+          })
+        })()
       ),
     ),
 
@@ -1165,15 +1182,18 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
         })
       ),
       !commLoading && commLossByInverter && commLossByInverter.length > 0 && h(Card, { title: 'Communication Loss by Inverter' },
-        h(ResponsiveContainer, { width: '100%', height: 300 },
-          h(BarChart, { data: commLossByInverter, margin: { top: 10, right: 10, left: 0, bottom: 0 } },
-            h(CartesianGrid, { strokeDasharray: '3 3', stroke: '#F1F5F9' }),
-            h(XAxis, { dataKey: 'inverter_id', tick: { fontSize: 10 } }),
-            h(YAxis, { tick: { fontSize: 10 } }),
-            h(Tooltip),
-            h(Bar, { dataKey: 'estimated_loss_kwh', fill: '#ef4444', name: 'Loss (kWh)' })
-          )
-        )
+        (()=>{
+          return h(window.EChart, {
+            style: { width: '100%', height: 300 },
+            option: {
+              tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+              grid: { top: 10, right: 10, left: 40, bottom: 24 },
+              xAxis: { type: 'category', data: commLossByInverter.map(d=>d.inverter_id), axisLabel: { fontSize: 10, color: 'var(--text-soft)' }, axisLine: { lineStyle: { color: 'var(--line)' } }, axisTick: {show:false} },
+              yAxis: { type: 'value', axisLabel: { fontSize: 10, color: 'var(--text-soft)' }, splitLine: { lineStyle: { type: 'dashed', color: 'var(--line)' } } },
+              series: [{ type: 'bar', name: 'Loss (kWh)', data: commLossByInverter.map(d=>d.estimated_loss_kwh), itemStyle: { color: '#ef4444', borderRadius: [4,4,0,0] } }]
+            }
+          })
+        })()
       ),
     ),
 
@@ -1281,15 +1301,16 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
         ),
 
         !cdLoading && invLossForTab.length > 0 && h(Card, { title: isClip ? 'Clipping Loss per Inverter' : 'Derating Loss per Inverter' },
-          h(ResponsiveContainer, { width: '100%', height: 320 },
-            h(BarChart, { data: invLossForTab, margin: { top: 10, right: 10, left: 0, bottom: 24 } },
-              h(CartesianGrid, { strokeDasharray: '3 3', stroke: '#1e293b' }),
-              h(XAxis, { dataKey: 'inverter_id', tick: { fontSize: 10, fill: '#94a3b8' }, angle: -35, textAnchor: 'end', height: 60 }),
-              h(YAxis, { tick: { fontSize: 10, fill: '#94a3b8' }, label: { value: 'kWh', angle: -90, position: 'insideLeft', style: { fontSize: 10, fill: '#94a3b8' } } }),
-              h(Tooltip, { formatter: (v) => Number(v).toFixed(2) + ' kWh', contentStyle: { background: '#0f172a', border: '1px solid #1e293b' } }),
-              h(Bar, { dataKey: 'loss_kwh', fill: accent, name: isClip ? 'Clipping Loss (kWh)' : 'Derating Loss (kWh)' })
-            )
-          )
+          h(window.EChart, {
+            style: { width: '100%', height: 320 },
+            option: {
+              tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: (params) => `${params[0].name}<br/>${params[0].marker} ${params[0].seriesName}: <b>${Number(params[0].value).toFixed(2)} kWh</b>`, backgroundColor: '#0f172a', borderColor: '#1e293b', textStyle: { color: '#f8fafc', fontSize: 12 } },
+              grid: { top: 10, right: 10, left: 45, bottom: 60 },
+              xAxis: { type: 'category', data: invLossForTab.map(d=>d.inverter_id), axisLabel: { fontSize: 10, color: '#94a3b8', rotate: 35 }, axisLine: { lineStyle: { color: '#1e293b' } }, axisTick: {show:false} },
+              yAxis: { type: 'value', name: 'kWh', nameLocation: 'middle', nameGap: 30, nameTextStyle: { color: '#94a3b8', fontSize: 10 }, axisLabel: { fontSize: 10, color: '#94a3b8' }, splitLine: { lineStyle: { type: 'dashed', color: '#1e293b' } } },
+              series: [{ type: 'bar', name: isClip ? 'Clipping Loss (kWh)' : 'Derating Loss (kWh)', data: invLossForTab.map(d=>d.loss_kwh), itemStyle: { color: accent, borderRadius: [4,4,0,0] } }]
+            }
+          })
         ),
 
         !cdLoading && h(Card, { title: `Per-Inverter Detail (${rowsForTab.length} inverter${rowsForTab.length === 1 ? '' : 's'})` },
@@ -1328,42 +1349,41 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
 
             !cdTimelineLoading && cdTimeline.length === 0 && h('div', { style: { padding: 40, textAlign: 'center', color: 'var(--text-soft)' } }, 'No timeline data for this inverter in the selected range.'),
 
-            !cdTimelineLoading && cdTimeline.length > 0 && (() => {
-              // Build contiguous runs of each "state" for ReferenceArea shading
+              !cdTimelineLoading && cdTimeline.length > 0 && (() => {
+              // ECharts CD timeline — replaces legacy ComposedChart (Recharts removed)
               const runs = [];
               let cur = null;
               for (const p of cdTimeline) {
                 if (p.state && p.state !== 'normal') {
                   if (cur && cur.state === p.state) { cur.end = p.timestamp; }
                   else { if (cur) runs.push(cur); cur = { state: p.state, start: p.timestamp, end: p.timestamp }; }
-                } else if (cur) {
-                  runs.push(cur); cur = null;
-                }
+                } else if (cur) { runs.push(cur); cur = null; }
               }
               if (cur) runs.push(cur);
 
-              return h(ResponsiveContainer, { width: '100%', height: 460 },
-                h(ComposedChart, { data: cdTimeline, margin: { top: 8, right: 24, left: 8, bottom: 12 } },
-                  h(CartesianGrid, { strokeDasharray: '3 3', stroke: '#1e293b' }),
-                  h(XAxis, { dataKey: 'timestamp', tick: { fontSize: 10, fill: '#94a3b8' }, tickFormatter: (t) => String(t).slice(5, 16) }),
-                  h(YAxis, { yAxisId: 'kw', tick: { fontSize: 10, fill: '#94a3b8' }, label: { value: 'Power (kW)', angle: -90, position: 'insideLeft', style: { fontSize: 11, fill: '#94a3b8' } } }),
-                  h(YAxis, { yAxisId: 'gti', orientation: 'right', tick: { fontSize: 10, fill: '#f59e0b' }, label: { value: 'GTI (W/m²)', angle: 90, position: 'insideRight', style: { fontSize: 11, fill: '#f59e0b' } } }),
-                  h(Tooltip, { contentStyle: { background: '#0f172a', border: '1px solid #1e293b', borderRadius: 8, fontSize: 12 }, labelFormatter: (l) => String(l).slice(0, 19) }),
-                  h(Legend, { wrapperStyle: { fontSize: 12 } }),
-                  ...runs.map((run, i) => h(ReferenceArea, {
-                    key: `${run.state}-${i}`,
-                    yAxisId: 'kw',
-                    x1: run.start,
-                    x2: run.end,
-                    fill: CD_KIND_COLOR[run.state] || '#64748b',
-                    fillOpacity: 0.15,
-                    stroke: 'none',
-                  })),
-                  h(Line, { yAxisId: 'kw', type: 'monotone', dataKey: 'virtual_ac_kw', name: 'Virtual (expected)', stroke: '#10b981', dot: false, strokeWidth: 2, strokeDasharray: '5 3' }),
-                  h(Line, { yAxisId: 'kw', type: 'monotone', dataKey: 'actual_ac_kw',  name: 'Actual',            stroke: '#3b82f6', dot: false, strokeWidth: 2 }),
-                  h(Line, { yAxisId: 'gti', type: 'monotone', dataKey: 'gti',          name: 'GTI (W/m²)',        stroke: '#f59e0b', dot: false, strokeWidth: 1.3, strokeOpacity: 0.8 }),
-                )
-              );
+              const xData = cdTimeline.map(d => String(d.timestamp || '').slice(5, 16));
+              const markAreas = runs.map(run => ([
+                { xAxis: String(run.start || '').slice(5, 16), itemStyle: { color: CD_KIND_COLOR[run.state] || '#64748b', opacity: 0.15 } },
+                { xAxis: String(run.end || '').slice(5, 16) }
+              ]));
+
+              const cdOption = {
+                backgroundColor: 'transparent',
+                tooltip: { trigger: 'axis', backgroundColor: '#0f172a', borderColor: '#1e293b', textStyle: { color: '#e2e8f0', fontSize: 12 }, axisPointer: { type: 'cross' } },
+                legend: { bottom: 0, textStyle: { color: '#94a3b8', fontSize: 12 } },
+                grid: { top: 20, right: 80, left: 60, bottom: 60 },
+                xAxis: { type: 'category', data: xData, axisLabel: { color: '#94a3b8', fontSize: 10 }, axisLine: { lineStyle: { color: '#1e293b' } } },
+                yAxis: [
+                  { name: 'Power (kW)', type: 'value', axisLabel: { color: '#94a3b8', fontSize: 10 }, axisLine: { lineStyle: { color: '#1e293b' } }, splitLine: { lineStyle: { color: '#1e293b', type: 'dashed' } } },
+                  { name: 'GTI (W/m²)', type: 'value', position: 'right', axisLabel: { color: '#f59e0b', fontSize: 10 }, axisLine: { lineStyle: { color: '#f59e0b' } }, splitLine: { show: false } }
+                ],
+                series: [
+                  { name: 'Virtual (expected)', type: 'line', yAxisIndex: 0, data: cdTimeline.map(d => d.virtual_ac_kw), lineStyle: { color: '#10b981', width: 2, type: 'dashed' }, symbol: 'none', markArea: { silent: true, data: markAreas } },
+                  { name: 'Actual', type: 'line', yAxisIndex: 0, data: cdTimeline.map(d => d.actual_ac_kw), lineStyle: { color: '#3b82f6', width: 2 }, symbol: 'none' },
+                  { name: 'GTI (W/m²)', type: 'line', yAxisIndex: 1, data: cdTimeline.map(d => d.gti), lineStyle: { color: '#f59e0b', width: 1.3, opacity: 0.8 }, symbol: 'none' },
+                ]
+              };
+              return h(window.EChart || 'div', { style: { width: '100%', height: 460 }, option: cdOption });
             })(),
 
             // Legend of kinds
@@ -1464,33 +1484,16 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
         if (!prData.length) return null;
         return h(Card, { title: 'Plant performance ratio (daily)' },
           h('div', { style: { height: 300, overflow: 'hidden', marginTop: 4 } },
-            h(ResponsiveContainer, { width: '100%', height: '100%' },
-              h(LineChart, { data: prData, margin: { top: 28, right: 16, left: 4, bottom: 8 } },
-                h(CartesianGrid, { strokeDasharray: '3 3', stroke: 'rgba(255,255,255,0.08)' }),
-                h(XAxis, { dataKey: 'date', tick: { fontSize: 10 }, padding: { left: 4, right: 4 } }),
-                h(YAxis, { tick: { fontSize: 10 }, domain: ([dataMin, dataMax]) => {
-                  const loY = dataMin != null ? Number(dataMin) : 0;
-                  const hiY = dataMax != null ? Number(dataMax) : 0;
-                  const span = Math.max(hiY - loY, 1e-6);
-                  const pad = Math.max(span * 0.18, 3);
-                  return [
-                    Math.max(0, loY - pad),
-                    Math.min(100, hiY + pad),
-                  ];
-                }, label: { value: 'PR %', angle: -90, position: 'insideLeft', fontSize: 11 } }),
-                h(Tooltip, { contentStyle: { background: 'var(--panel)' } }),
-                h(Line, {
-                  type: 'monotone',
-                  dataKey: 'pr_pct',
-                  name: 'Plant PR',
-                  stroke: 'var(--accent)',
-                  strokeWidth: 2,
-                  dot: { r: 3 },
-                  connectNulls: true,
-                  isAnimationActive: false,
-                })
-              )
-            )
+            h(window.EChart, {
+              style: { width: '100%', height: '100%' },
+              option: {
+                tooltip: { trigger: 'axis', backgroundColor: 'var(--panel)', borderColor: 'var(--line)', textStyle: { color: 'var(--text)' } },
+                grid: { top: 28, right: 16, left: 40, bottom: 24 },
+                xAxis: { type: 'category', boundaryGap: false, data: prData.map(d=>d.date), axisLabel: { fontSize: 10, color: 'var(--text-soft)' }, axisLine: { lineStyle: { color: 'var(--line)' } } },
+                yAxis: { type: 'value', scale: true, axisLabel: { fontSize: 10, color: 'var(--text-soft)' }, splitLine: { lineStyle: { type: 'dashed', color: 'rgba(255,255,255,0.08)' } } },
+                series: [{ type: 'line', name: 'PR %', data: prData.map(d=>d.pr_pct), itemStyle: { color: '#14b8a6' }, symbol: 'circle', symbolSize: 6, lineStyle: { width: 2 }, smooth: true }]
+              }
+            })
           )
         );
       })(),
@@ -1513,15 +1516,19 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
           h(Spinner), ' Loading rankings…'
         ),
         !soilingRankingsLoading && (!(soilingRankings && (soilingRankings.rows || []).length)) && h('div', { className: 'empty-state', style: { minHeight: 120 } }, 'No ranking data for this range.'),
-        !soilingRankingsLoading && (soilingRankings && Array.isArray(soilingRankings.rows) && soilingRankings.rows.length > 0) && h(ResponsiveContainer, { width: '100%', height: 360 },
-          h(BarChart, { data: soilingRankings.rows.map(r => ({ name: r.label || r.id, loss: Number(r.loss_mwh) || 0 })), margin: { top: 10, right: 20, left: 8, bottom: 60 } },
-            h(CartesianGrid, { strokeDasharray: '3 3', stroke: 'rgba(255,255,255,0.08)' }),
-            h(XAxis, { dataKey: 'name', tick: { fontSize: 9 }, angle: -35, textAnchor: 'end', height: 70, interval: 0 }),
-            h(YAxis, { tick: { fontSize: 10 }, label: { value: 'MWh', angle: -90, position: 'insideLeft' } }),
-            h(Tooltip, { contentStyle: { background: 'var(--panel)' } }),
-            h(Bar, { dataKey: 'loss', name: 'Loss (MWh)', fill: '#f97316', radius: [2, 2, 0, 0] })
-          )
-        )
+        !soilingRankingsLoading && (soilingRankings && Array.isArray(soilingRankings.rows) && soilingRankings.rows.length > 0) && (()=>{
+          const rankingData = soilingRankings.rows.map(r => ({ name: r.label || r.id, loss: Number(r.loss_mwh) || 0 }));
+          return h(window.EChart, {
+            style: { width: '100%', height: 360 },
+            option: {
+              tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, backgroundColor: 'var(--panel)', borderColor: 'var(--line)', textStyle: { color: 'var(--text)' } },
+              grid: { top: 20, right: 20, left: 50, bottom: 80 },
+              xAxis: { type: 'category', data: rankingData.map(d=>d.name), axisLabel: { fontSize: 9, color: 'var(--text-soft)', rotate: 35 }, axisLine: { lineStyle: { color: 'var(--line)' } }, axisTick: {show:false} },
+              yAxis: { type: 'value', name: 'MWh', nameLocation: 'middle', nameGap: 35, nameTextStyle: { color: 'var(--text-soft)', fontSize: 10 }, axisLabel: { fontSize: 10, color: 'var(--text-soft)' }, splitLine: { lineStyle: { type: 'dashed', color: 'rgba(255,255,255,0.08)' } } },
+              series: [{ type: 'bar', name: 'Loss (MWh)', data: rankingData.map(d=>d.loss), itemStyle: { color: '#f97316', borderRadius: [2,2,0,0] } }]
+            }
+          })
+        })()
       ),
 
       !scbPerfLoading && !scbPerfHeatmap && h(Card, { title: 'Soiling heatmap' },
@@ -1933,15 +1940,16 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
 
       h(Card, { title: 'Active Disconnected Strings by Inverter' },
         invChartData.length > 0
-          ? h(ResponsiveContainer, { width: '100%', height: 300 },
-              h(BarChart, { data: invChartData, margin: { top: 10, right: 10, left: 0, bottom: 0 } },
-                h(CartesianGrid, { strokeDasharray: '3 3', stroke: '#F1F5F9' }),
-                h(XAxis, { dataKey: 'inverter_id', tick: { fontSize: 10 } }),
-                h(YAxis, { tick: { fontSize: 10 } }),
-                h(Tooltip),
-                h(Bar, { dataKey: 'missing_strings', fill: '#f59e0b', name: 'Disconnected Strings (Mode)' })
-              )
-            )
+          ? h(window.EChart, {
+              style: { width: '100%', height: 300 },
+              option: {
+                tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+                grid: { top: 10, right: 10, left: 40, bottom: 24 },
+                xAxis: { type: 'category', data: invChartData.map(d=>d.inverter_id), axisLabel: { fontSize: 10, color: 'var(--text-soft)' }, axisLine: { lineStyle: { color: 'var(--line)' } }, axisTick: {show:false} },
+                yAxis: { type: 'value', axisLabel: { fontSize: 10, color: 'var(--text-soft)' }, splitLine: { lineStyle: { type: 'dashed', color: 'var(--line)' } } },
+                series: [{ type: 'bar', name: 'Disconnected Strings (Mode)', data: invChartData.map(d=>d.missing_strings), itemStyle: { color: '#f59e0b', borderRadius: [4,4,0,0] } }]
+              }
+            })
           : h('div', { style: { padding: 40, textAlign: 'center', color: 'var(--text-muted)' } }, 'No active DS faults to display.')
       ),
 
@@ -1949,16 +1957,17 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
         !dsSummary?.energy_available
           ? h('div', { style: { padding: 40, textAlign: 'center', color: 'var(--text-muted)' } }, dsSummary?.energy_note || 'Energy cannot be calculated.')
           : energyChartData.length > 0
-          ? h(ResponsiveContainer, { width: '100%', height: 300 },
-              h(BarChart, { data: energyChartData, margin: { top: 10, right: 10, left: 0, bottom: 0 } },
-                h(CartesianGrid, { strokeDasharray: '3 3', stroke: '#F1F5F9' }),
-                h(XAxis, { dataKey: 'timestamp', tick: { fontSize: 10 }, tickFormatter: v => v.slice(5) }),
-                h(YAxis, { tick: { fontSize: 10 } }),
-                h(Tooltip),
-                h(Legend),
-                h(Bar, { dataKey: 'total_energy_loss', fill: '#EF4444', name: 'Energy Loss (kWh)', radius: [2, 2, 0, 0] })
-              )
-            )
+          ? h(window.EChart, {
+              style: { width: '100%', height: 300 },
+              option: {
+                tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+                legend: { bottom: 0, textStyle: { color: 'var(--text-soft)' } },
+                grid: { top: 10, right: 10, left: 40, bottom: 30 },
+                xAxis: { type: 'category', data: energyChartData.map(d=>d.timestamp), axisLabel: { fontSize: 10, color: 'var(--text-soft)', formatter: v => v.slice(5) }, axisLine: { lineStyle: { color: 'var(--line)' } }, axisTick: {show:false} },
+                yAxis: { type: 'value', axisLabel: { fontSize: 10, color: 'var(--text-soft)' }, splitLine: { lineStyle: { type: 'dashed', color: 'var(--line)' } } },
+                series: [{ type: 'bar', name: 'Energy Loss (kWh)', data: energyChartData.map(d=>d.total_energy_loss), itemStyle: { color: '#ef4444', borderRadius: [2,2,0,0] } }]
+              }
+            })
           : h('div', { style: { padding: 40, textAlign: 'center', color: 'var(--text-muted)' } }, 'No energy loss data for this period.')
       )
     ),
@@ -3111,33 +3120,14 @@ const FaultDetailModal = ({ scbId, scbStringsMap, archList = [], plantId, dateFr
                   onClick: () => setNormalized(true)
                 }, 'Normalized (Per-String)')
               ),
-
-              window.echarts
-                ? h('div', { ref: chartRef, style: { height: 320, width: '100%' } })
-                : h('div', { style: { height: 320, width: '100%' } },
-                    h(ResponsiveContainer, null,
-                      h(ComposedChart, { data: chartData, margin: { top: 20, right: 30, left: 20, bottom: 20 } },
-                        h(CartesianGrid, { strokeDasharray: '3 3' }),
-                        h(XAxis, { dataKey: 'formatted_time', tick: { fontSize: 10 }, interval: 'preserveStartEnd' }),
-                        h(YAxis, { yAxisId: 'left', label: { value: 'Current (A)', angle: -90, position: 'insideLeft' }, domain: [0, (dataMax) => Math.ceil(dataMax * 1.1)] }),
-                        h(YAxis, { yAxisId: 'right', orientation: 'right', label: { value: 'Disconnected Strings', angle: 90, position: 'insideRight' }, allowDecimals: false, domain: [0, 'dataMax'] }),
-                        h(Tooltip, { contentStyle: { borderRadius: 8, border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' } }),
-                        h(Legend, { wrapperStyle: { cursor: 'pointer' }, onClick: toggleLine }),
-                        faultAreas.map((area, idx) =>
-                          h(ReferenceArea, { key: idx, yAxisId: 'left', x1: area.start.slice(5, 16), x2: area.end.slice(5, 16), strokeOpacity: 0.3, fill: '#ef4444', fillOpacity: 0.15 })
-                        ),
-                        h(Line, { yAxisId: 'left', type: 'monotone', name: (compareScbId ? scbId + ' Ref' : 'Reference Current'), dataKey: 'expected', stroke: '#10b981', strokeWidth: 2, dot: false, connectNulls: true, hide: hiddenLines.includes('expected') }),
-                        h(Line, { yAxisId: 'left', type: 'monotone', name: (compareScbId ? scbId + ' Actual' : 'Actual Current'), dataKey: 'actual', stroke: '#3b82f6', strokeWidth: 2, dot: false, connectNulls: true, hide: hiddenLines.includes('actual') }),
-                        compareScbId && chartData.some(d => d.actualCompare != null) && h(Line, { yAxisId: 'left', type: 'monotone', name: compareScbId + ' Actual', dataKey: 'actualCompare', stroke: '#60a5fa', strokeWidth: 2, strokeDasharray: '4 4', dot: false, connectNulls: true }),
-                        h(Bar, { yAxisId: 'right', dataKey: 'missing', name: 'Disconnected Strings', fill: '#ef4444', opacity: 0.4, hide: hiddenLines.includes('missing') }),
-                        h(Brush, { dataKey: 'formatted_time', height: 30, stroke: '#8884d8' })
-                      )
-                    )
-                  )
+              // ECharts chart is initialized via useEffect on chartRef — no Recharts components needed here
+              h('div', { ref: chartRef, style: { height: 320, width: '100%' } })
             )
     )
   );
 };
+
+console.info('[solar-trace] fault_page.js initialization complete (window.FaultPage set)');
 
 
 

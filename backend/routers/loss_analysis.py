@@ -6,6 +6,7 @@ per-category fault losses (same list as unified feed), unknown gap vs metered ac
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Query
@@ -13,7 +14,9 @@ from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from auth.routes import get_current_user
-from database import get_db
+from database import get_db, SessionLocal
+from module_snapshots import get_loss_analysis_snapshot, save_loss_analysis_snapshot
+from snap_perf import record_compute_ms, record_snapshot
 from db_perf import choose_data_table
 from models import EquipmentSpec, PlantArchitecture, PlantEquipment, User
 from routers.dashboard import _wms_kpis_payload, _wms_tilt_insolation_kwh_m2
@@ -388,19 +391,17 @@ def loss_options(
     return {"inverters": inverters, "scbs": scbs, "strings": strings}
 
 
-@_loss_routes.get("/bridge")
-def loss_bridge(
-    plant_id: str = Query(...),
-    date_from: Optional[str] = Query(None),
-    date_to: Optional[str] = Query(None),
-    scope: str = Query("plant", description="plant | inverter | scb | string"),
-    equipment_id: Optional[str] = Query(None, description="inverter id, scb id, or string key inv::scb::str"),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
+def build_loss_bridge_payload(
+    db: Session,
+    plant_id: str,
+    date_from: Optional[str],
+    date_to: Optional[str],
+    scope: str,
+    equipment_id: Optional[str],
+    current_user: User,
+) -> dict:
     """
-    Build waterfall + table rows. Fault categories mirror `/api/faults/unified-feed` so new
-    categories added there appear automatically.
+    Full `/bridge` response dict (including error keys). Used by the route and post-ingest precompute.
     """
     _from, _to = _fault_date_range(date_from, date_to)
     f_ts, t_ts = f"{_from} 00:00:00", f"{_to} 23:59:59"
@@ -583,6 +584,39 @@ def loss_bridge(
             "Table keeps aggregated All losses; chart shows individual steps.",
         ],
     }
+
+
+@_loss_routes.get("/bridge")
+def loss_bridge(
+    plant_id: str = Query(...),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    scope: str = Query("plant", description="plant | inverter | scb | string"),
+    equipment_id: Optional[str] = Query(None, description="inverter id, scb id, or string key inv::scb::str"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Build waterfall + table rows. Uses `loss_analysis_snapshot` when fresh vs raw_data_stats.
+    """
+    t0 = time.perf_counter()
+    _from, _to = _fault_date_range(date_from, date_to)
+    scope_l = (scope or "plant").strip().lower()
+    snap = get_loss_analysis_snapshot(db, plant_id, _from, _to, scope_l, equipment_id or "")
+    if snap is not None:
+        record_snapshot("loss_bridge", True)
+        record_compute_ms("loss_bridge_http", (time.perf_counter() - t0) * 1000.0, f"hit plant={plant_id}")
+        return snap
+    record_snapshot("loss_bridge", False)
+    out = build_loss_bridge_payload(db, plant_id, date_from, date_to, scope, equipment_id, current_user)
+    if isinstance(out, dict) and not out.get("error"):
+        wdb = SessionLocal()
+        try:
+            save_loss_analysis_snapshot(wdb, plant_id, _from, _to, scope_l, equipment_id or "", out)
+        finally:
+            wdb.close()
+    record_compute_ms("loss_bridge_http", (time.perf_counter() - t0) * 1000.0, f"miss plant={plant_id}")
+    return out
 
 
 router = APIRouter(prefix="/api/loss-analysis")

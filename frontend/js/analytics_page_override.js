@@ -85,18 +85,20 @@
       if (level === 'wms') {
         return METEO_SIGNALS.has(sig);
       }
+      // Inverter / SCB / string: exclude meteo from electrical hierarchies; allow any other DB signal name
+      // (e.g. active_power, reactive_power) so Analytics Lab matches real column names from uploads.
       if (level === 'inverter') {
-        return new Set(['ac_power', 'dc_power', 'dc_current', 'dc_voltage', 'energy_export_kwh', 'energy_generation_kwh', 'status']).has(sig);
+        if (METEO_SIGNALS.has(sig)) return false;
+        return true;
       }
       if (level === 'scb') {
-        return new Set(['dc_current', 'dc_voltage', 'dc_power', 'string_count']).has(sig);
+        if (METEO_SIGNALS.has(sig)) return false;
+        return true;
       }
       if (level === 'string') {
         const s = String(sig).toLowerCase();
         if (METEO_SIGNALS.has(sig) || METEO_SIGNALS.has(s)) return false;
-        if (new Set(['dc_current', 'dc_voltage', 'dc_power', 'current', 'voltage']).has(s)) return true;
-        if (s.includes('current') || (s.includes('voltage') && !s.includes('ac_'))) return true;
-        return false;
+        return true;
       }
       return false;
     }
@@ -176,6 +178,7 @@
     const [signalLoading, setSignalLoading] = useState(false);
     const [hiddenLines, setHiddenLines] = useState([]);
     const [scbMetadata, setScbMetadata] = useState(null);
+    const equipSigReqRef = useRef(0);
 
     useEffect(() => {
       if (!selected.length) return;
@@ -216,13 +219,102 @@
         return;
       }
 
+      const reqId = ++equipSigReqRef.current;
+      let cancelled = false;
+      let retryTimer = null;
+
+      const applyResults = (results, isRetry) => {
+        if (cancelled || reqId !== equipSigReqRef.current) return;
+        results.forEach(r => {
+          if (r._equipErr) console.warn('Analytics equipment failed', r.level, r._equipErr);
+          if (r._sigErr) console.warn('Analytics signals failed', r.level, r._sigErr);
+        });
+        const items = [];
+        const signalSet = new Set();
+        const seenKeys = new Set();
+
+        results.forEach(({ level, equipResp, signalResp }) => {
+          let nextEquip = equipResp.equipment_ids || [];
+          let nextSignals = sortSignals(signalResp.signals || []);
+
+          if (level === 'wms') {
+            const looksLikeStringTags = nextEquip.length > 0 && nextEquip.every(id => String(id).startsWith('STR-'));
+            if (looksLikeStringTags || nextEquip.length > 5) {
+              nextEquip = [plantId];
+            }
+            if (plantId && !nextEquip.includes(plantId)) {
+              nextEquip = [plantId, ...nextEquip];
+            }
+            if (nextSignals.length === 0) {
+              nextSignals = WMS_SIGNAL_FALLBACK.slice();
+            }
+          }
+
+          nextSignals.forEach(s => signalSet.add(s));
+
+          nextEquip.forEach(eq => {
+            const key = makePickerKey(level, eq);
+            if (seenKeys.has(key)) return;
+            seenKeys.add(key);
+            items.push({
+              id: key,
+              label: `${eq} (${levelLabel(level)})`,
+            });
+          });
+        });
+
+        const mergedSignals = sortSignals([...signalSet]);
+        setPickerItems(items);
+        setAvailableSignals(mergedSignals);
+        setSelected(prev => prev.filter(k => seenKeys.has(k)));
+        setSearch('');
+        setParams(prev => {
+          const kept = prev.filter(sig => mergedSignals.includes(sig));
+          return kept.length ? kept : defaultSignalsMerged(selectedLevels, mergedSignals);
+        });
+        if (!mergedSignals.includes('dc_current')) setNormalize(false);
+
+        // One retry after cold start / DB timeout: equipment exists but signals empty.
+        if (!isRetry && mergedSignals.length === 0 && items.length > 0 && reqId === equipSigReqRef.current) {
+          retryTimer = window.setTimeout(() => {
+            if (cancelled || reqId !== equipSigReqRef.current) return;
+            setSignalLoading(true);
+            const retryFetches = selectedLevels.map(lvl =>
+              Promise.allSettled([
+                window.SolarAPI.Analytics.equipment(lvl, plantId),
+                window.SolarAPI.Analytics.signals(lvl, plantId),
+              ]).then(([equipSettled, signalSettled]) => ({
+                level: lvl,
+                equipResp: equipSettled.status === 'fulfilled' ? equipSettled.value : { equipment_ids: [] },
+                signalResp: signalSettled.status === 'fulfilled' ? signalSettled.value : { signals: [] },
+                _equipErr: equipSettled.status === 'rejected' ? equipSettled.reason : null,
+                _sigErr: signalSettled.status === 'rejected' ? signalSettled.reason : null,
+              }))
+            );
+            Promise.all(retryFetches)
+              .then(rr => applyResults(rr, true))
+              .catch(() => {
+                if (!cancelled && reqId === equipSigReqRef.current) {
+                  setPickerItems([]);
+                  setAvailableSignals([]);
+                }
+              })
+              .finally(() => {
+                if (!cancelled && reqId === equipSigReqRef.current) {
+                  setEquipLoading(false);
+                  setSignalLoading(false);
+                }
+              });
+          }, 2800);
+        }
+      };
+
       setEquipLoading(true);
       setSignalLoading(true);
       setTsData([]);
       setAvail(0);
       setHiddenLines([]);
 
-      // Per-level: don't let one failed /signals call wipe the whole Lab (Promise.all would reject).
       const fetches = selectedLevels.map(lvl =>
         Promise.allSettled([
           window.SolarAPI.Analytics.equipment(lvl, plantId),
@@ -237,67 +329,27 @@
       );
 
       Promise.all(fetches)
-        .then(results => {
-          results.forEach(r => {
-            if (r._equipErr) console.warn('Analytics equipment failed', r.level, r._equipErr);
-            if (r._sigErr) console.warn('Analytics signals failed', r.level, r._sigErr);
-          });
-          const items = [];
-          const signalSet = new Set();
-          const seenKeys = new Set();
-
-          results.forEach(({ level, equipResp, signalResp }) => {
-            let nextEquip = equipResp.equipment_ids || [];
-            let nextSignals = sortSignals(signalResp.signals || []);
-
-            if (level === 'wms') {
-              const looksLikeStringTags = nextEquip.length > 0 && nextEquip.every(id => String(id).startsWith('STR-'));
-              if (looksLikeStringTags || nextEquip.length > 5) {
-                nextEquip = [plantId];
-              }
-              if (plantId && !nextEquip.includes(plantId)) {
-                nextEquip = [plantId, ...nextEquip];
-              }
-              if (nextSignals.length === 0) {
-                nextSignals = WMS_SIGNAL_FALLBACK.slice();
-              }
-            }
-
-            nextSignals.forEach(s => signalSet.add(s));
-
-            nextEquip.forEach(eq => {
-              const key = makePickerKey(level, eq);
-              if (seenKeys.has(key)) return;
-              seenKeys.add(key);
-              items.push({
-                id: key,
-                label: `${eq} (${levelLabel(level)})`,
-              });
-            });
-          });
-
-          const mergedSignals = sortSignals([...signalSet]);
-          setPickerItems(items);
-          setAvailableSignals(mergedSignals);
-          setSelected(prev => prev.filter(k => seenKeys.has(k)));
-          setSearch('');
-          setParams(prev => {
-            const kept = prev.filter(sig => mergedSignals.includes(sig));
-            return kept.length ? kept : defaultSignalsMerged(selectedLevels, mergedSignals);
-          });
-          if (!mergedSignals.includes('dc_current')) setNormalize(false);
-        })
+        .then(results => applyResults(results, false))
         .catch(() => {
-          setPickerItems([]);
-          setAvailableSignals([]);
-          setSelected([]);
-          setParams([]);
-          setNormalize(false);
+          if (!cancelled && reqId === equipSigReqRef.current) {
+            setPickerItems([]);
+            setAvailableSignals([]);
+            setSelected([]);
+            setParams([]);
+            setNormalize(false);
+          }
         })
         .finally(() => {
-          setEquipLoading(false);
-          setSignalLoading(false);
+          if (!cancelled && reqId === equipSigReqRef.current && !retryTimer) {
+            setEquipLoading(false);
+            setSignalLoading(false);
+          }
         });
+
+      return () => {
+        cancelled = true;
+        if (retryTimer) window.clearTimeout(retryTimer);
+      };
     }, [selectedLevels, plantId]);
 
     const toggleParam = (param) => {

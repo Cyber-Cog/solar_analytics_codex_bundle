@@ -188,6 +188,52 @@ const NavIcons = {
 
 const Chevron = ({ open }) => h('svg', { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', style: { transform: open ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.2s' } }, h('polyline', { points: '9 18 15 12 9 6' }));
 
+const ROUTE_EST_TIMES = {
+  'Fault Diagnostics': { lo: 4, hi: 10, label: 'Fault Diagnostics module' },
+  'Loss Analysis':     { lo: 3, hi: 8,  label: 'Loss Analysis module' },
+  'Analytics Lab':     { lo: 3, hi: 8,  label: 'Analytics Lab module' },
+  'Reports':           { lo: 3, hi: 7,  label: 'Reports module' },
+  'Metadata':          { lo: 2, hi: 6,  label: 'Metadata module' },
+  'Guidebook':         { lo: 1, hi: 4,  label: 'Guidebook' },
+  'Admin':             { lo: 2, hi: 6,  label: 'Admin module' },
+};
+
+// Proper React component — hooks MUST be inside a named component, NOT an IIFE.
+function RouteLoadingScreen({ page }) {
+  const h = React.createElement;
+  const est = ROUTE_EST_TIMES[page] || { lo: 2, hi: 6, label: (page || 'module') };
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    setElapsed(0);
+    const id = setInterval(() => setElapsed(s => s + 1), 1000);
+    return () => clearInterval(id);
+  }, [page]);
+  const progress = Math.min(95, (elapsed / est.hi) * 100);
+  const remaining = Math.max(0, est.lo - elapsed);
+  const statusMsg = elapsed < est.lo
+    ? `~${remaining}–${Math.max(1, est.hi - elapsed)}s remaining`
+    : elapsed < est.hi
+    ? 'Almost there…'
+    : 'Taking a bit longer than usual…';
+
+  return h('div', {
+    className: 'route-loading-screen',
+    style: { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14, minHeight: 320, padding: 32 }
+  },
+    h(window.Spinner, { size: 32 }),
+    h('div', { style: { textAlign: 'center' } },
+      h('div', { style: { color: 'var(--text-soft)', fontSize: 14, fontWeight: 600, marginBottom: 4 } },
+        `Loading ${est.label}…`
+      ),
+      h('div', { style: { color: 'var(--text-muted)', fontSize: 12 } }, statusMsg),
+    ),
+    h('div', { style: { width: 260, height: 4, background: 'rgba(255,255,255,0.08)', borderRadius: 4, overflow: 'hidden', marginTop: 4 } },
+      h('div', { style: { height: '100%', width: progress + '%', background: 'linear-gradient(90deg, var(--accent, #0ea5e9), #22c55e)', borderRadius: 4, transition: 'width 0.9s ease' } })
+    ),
+    h('div', { style: { color: 'var(--text-muted)', fontSize: 11 } }, `Estimated: ${est.lo}–${est.hi}s`),
+  );
+}
+
 const FAULT_DIAG_SIDEBAR = [
   { sub: 'overview', label: 'Overview' },
   { sub: 'ds', label: 'Disconnected Strings' },
@@ -349,7 +395,7 @@ function App() {
     setThemeState(n);
   }, []);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [dateFrom, setDateFrom] = useState(new Date(Date.now() - 7 * 864e5).toISOString().slice(0, 10));
+  const [dateFrom, setDateFrom] = useState(new Date(Date.now() - 1 * 864e5).toISOString().slice(0, 10));
   const [dateTo, setDateTo] = useState(new Date().toISOString().slice(0, 10));
 
   useLayoutEffect(() => {
@@ -432,6 +478,19 @@ function App() {
       : Promise.resolve();
     run.then(function () {
       if (cancelled) return;
+      
+      // Verify critical component exists for the requested page
+      if (page === 'Fault Diagnostics' && !window.FaultPage) {
+        console.error('[solar-error] FaultPage module loaded but window.FaultPage missing');
+        setRouteLoadErr('Fault Diagnostics module failed to initialize. Try refreshing.');
+        return;
+      }
+      if (page === 'Analytics Lab' && !window.AnalyticsPage) {
+        console.error('[solar-error] AnalyticsPage module loaded but window.AnalyticsPage missing');
+        setRouteLoadErr('Analytics Lab module failed to initialize. Try refreshing.');
+        return;
+      }
+
       try {
         if (localStorage.getItem('solar_perf_log') === '1' && performance.now) {
           console.info('[solar-perf] app-route-ready', page, Math.round(performance.now() - t0) + 'ms');
@@ -439,6 +498,7 @@ function App() {
       } catch (e) {}
       setRouteReady(true);
     }).catch(function (e) {
+      console.error('[solar-error] Route load failed:', page, e);
       if (!cancelled) setRouteLoadErr((e && e.message) ? e.message : String(e));
     });
     return function () { cancelled = true; };
@@ -452,18 +512,14 @@ function App() {
     h('div', { className: 'main-area' },
       h(Topbar, { page, plants, plantId, onPlantChange: (id) => { setPlantId(id); localStorage.setItem(PLANT_STORAGE_KEY, id); }, onAddPlant: () => { }, dateFrom, dateTo, onDateChange: (f, t) => { setDateFrom(f); setDateTo(t); }, user, theme, onThemeToggle: () => setTheme((theme && (theme.startsWith('light_') || theme === 'light_paper')) ? 'dark_ocean' : 'light_paper'), onThemeSelect: setTheme, sidebarOpen, onToggleSidebar: handleToggleSidebar }),
       h('div', { className: 'page-content', key: page },
-        !routeReady && h('div', { className: 'route-loading-screen', style: { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14, minHeight: 320, padding: 32 } },
-          h(window.Spinner, { size: 32 }),
-          h('span', { style: { color: 'var(--text-soft)', fontSize: 13 } }, 'Loading module…'),
-          window.SkeletonLoader && h(window.SkeletonLoader, { count: 5, height: '12px' }),
-        ),
+        !routeReady && h(RouteLoadingScreen, { page }),
         routeLoadErr && h('div', { className: 'card', style: { padding: 24, borderColor: 'rgba(235,107,107,0.35)' } },
           h('h2', { style: { fontSize: 16, marginBottom: 8 } }, 'Could not load page scripts'),
           h('p', { style: { color: 'var(--text-soft)', fontSize: 13, marginBottom: 8 } }, routeLoadErr),
           h('p', { style: { color: 'var(--text-muted)', fontSize: 12 } }, 'Refresh the page. If the problem persists, clear cache and try again.'),
         ),
-        routeReady && !routeLoadErr && page === 'Dashboard' && h(window.DashboardPage, { plantId, dateFrom, dateTo, onNavigate: handlePageChange }),
-        routeReady && !routeLoadErr && page === 'Fault Diagnostics' && h(window.FaultPage, { plantId, dateFrom, dateTo, faultSub, onNavigateFaultSub: handleNavigateFaultSub }),
+        routeReady && !routeLoadErr && page === 'Dashboard' && window.DashboardPage && h(window.DashboardPage, { plantId, dateFrom, dateTo, onNavigate: handlePageChange }),
+        routeReady && !routeLoadErr && page === 'Fault Diagnostics' && window.FaultPage && h(window.FaultPage, { plantId, dateFrom, dateTo, faultSub, onNavigateFaultSub: handleNavigateFaultSub }),
         routeReady && !routeLoadErr && page === 'Analytics Lab' && window.AnalyticsPage && h(window.AnalyticsPage, { plantId, dateFrom, dateTo, onNavigate: handlePageChange }),
         routeReady && !routeLoadErr && page === 'Loss Analysis' && window.LossAnalysisPage && h(window.LossAnalysisPage, { plantId, dateFrom, dateTo }),
         routeReady && !routeLoadErr && page === 'Reports' && window.ReportsPage && h(window.ReportsPage, { plantId, plants, dateFrom, dateTo }),

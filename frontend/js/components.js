@@ -1,11 +1,6 @@
 // frontend/js/components.js
 // Shared UI components used across all pages
 const { useState, useEffect, useCallback, useRef, useMemo } = React;
-const {
-  BarChart, Bar, LineChart, Line, ComposedChart,
-  XAxis, YAxis, CartesianGrid, Tooltip, Legend,
-  ResponsiveContainer, ReferenceLine, Cell
-} = window.Recharts || {};
 
 // ── Spinner ───────────────────────────────────────────────────────────────────
 window.Spinner = ({ size = 20 } = {}) => React.createElement('div', { 

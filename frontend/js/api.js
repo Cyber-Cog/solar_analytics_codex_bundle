@@ -527,6 +527,12 @@ const Faults = {
       return await apiFetch(`/api/faults/unified-feed?${qs}`);
     } catch (e) {
       const msg = String((e && e.message) || e);
+      const st = e && e.status;
+      // Stale API (404) or server overload / DB timeout (5xx) — merge legacy endpoints so Overview still loads.
+      if (st >= 500 && st < 600) {
+        console.warn('unified-feed returned', st, msg.slice(0, 200), '— using client-side merge (slower).');
+        return buildUnifiedFeedClientSide(plantId, from, to);
+      }
       if (!/not found|404/i.test(msg)) throw e;
       return buildUnifiedFeedClientSide(plantId, from, to);
     }
@@ -582,6 +588,9 @@ const Admin = {
   },
   runPrecompute: () => apiFetch('/api/admin/perf/run-precompute', { method: 'POST' }),
   precomputeStatus: () => apiFetch('/api/admin/perf/precompute-status'),
+  /** Durable queue: fills DS / unified / loss + fault tab snapshots. Worker: `python -m jobs.precompute_runner --once` */
+  precomputeQueue: () => apiFetch('/api/admin/precompute/queue?limit=40'),
+  precomputeEnqueue: (body) => apiFetch('/api/admin/precompute/enqueue', { method: 'POST', body: JSON.stringify(body || {}) }),
 };
 
 // ── Reports ───────────────────────────────────────────────────────────────────

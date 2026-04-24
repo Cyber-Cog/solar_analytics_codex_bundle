@@ -4,10 +4,12 @@ backend/routers/analytics.py
 Analytics Lab API — equipment list, timeseries data, availability.
 """
 
+import logging
+
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func
-from typing import List, Optional
+from typing import List, Optional, Set
 from datetime import date, timedelta
 
 from database import get_read_db
@@ -15,6 +17,8 @@ from db_perf import choose_data_table
 from models import User, PlantEquipment, PlantArchitecture, EquipmentSpec
 from schemas import EquipmentListResponse, TimeseriesPoint, TimeseriesResponse
 from auth.routes import get_current_user
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/analytics", tags=["Analytics Lab"])
 VALID_LEVELS = {"inverter", "scb", "string", "wms"}
@@ -27,6 +31,124 @@ VALID_LEVELS = {"inverter", "scb", "string", "wms"}
 # Use dc_source=scb_aggregate to prefer (3) when you explicitly want summed SCB currents.
 _DC_INVERTER_DEDUPE_SIGNALS = frozenset({"dc_current", "dc_power"})
 _NORMALIZE_MIN_IRR_W_M2 = 50.0
+
+# Analytics Lab /signals: avoid full-table DISTINCT on huge plants (25s statement_timeout).
+_CHUNK_EQ = 72
+
+
+def _distinct_signals_safe(db: Session, sql: str, params: dict, tag: str) -> Set[str]:
+    try:
+        rows = db.execute(text(sql), params).fetchall()
+        return {str(r[0]).strip() for r in rows if r and r[0] is not None and str(r[0]).strip()}
+    except Exception as exc:
+        log.warning("analytics.signals %s plant_id=%s: %s", tag, params.get("plant_id"), exc)
+        return set()
+
+
+def _ids_simple(db: Session, sql: str, plant_id: str, tag: str) -> List[str]:
+    try:
+        rows = db.execute(text(sql), {"plant_id": plant_id}).fetchall()
+        out: List[str] = []
+        seen: Set[str] = set()
+        for r in rows:
+            if not r or r[0] is None:
+                continue
+            s = str(r[0]).strip()
+            if s and s not in seen:
+                seen.add(s)
+                out.append(s)
+        return out
+    except Exception as exc:
+        log.warning("analytics.signals id-list %s plant_id=%s: %s", tag, plant_id, exc)
+        return []
+
+
+def _signals_raw_by_equipment_ids(db: Session, plant_id: str, ids: List[str]) -> Set[str]:
+    """Indexed path: (plant_id, equipment_id, …) — batched to keep bind params small."""
+    out: Set[str] = set()
+    clean = [str(x).strip() for x in ids if x and str(x).strip()]
+    if not clean:
+        return out
+    for i in range(0, len(clean), _CHUNK_EQ):
+        chunk = clean[i : i + _CHUNK_EQ]
+        named = {f"id_{j}": v for j, v in enumerate(chunk)}
+        cols = ", ".join(f":id_{j}" for j in range(len(chunk)))
+        sql = (
+            "SELECT DISTINCT signal FROM raw_data_generic "
+            "WHERE plant_id = :plant_id AND equipment_id IN (" + cols + ")"
+        )
+        out |= _distinct_signals_safe(db, sql, {"plant_id": plant_id, **named}, "raw_by_equip_chunk")
+    return out
+
+
+def _signals_dc_by_equipment_ids(db: Session, plant_id: str, ids: List[str]) -> Set[str]:
+    out: Set[str] = set()
+    clean = [str(x).strip() for x in ids if x and str(x).strip()]
+    if not clean:
+        return out
+    for i in range(0, len(clean), _CHUNK_EQ):
+        chunk = clean[i : i + _CHUNK_EQ]
+        named = {f"id_{j}": v for j, v in enumerate(chunk)}
+        cols = ", ".join(f":id_{j}" for j in range(len(chunk)))
+        sql = (
+            "SELECT DISTINCT signal FROM dc_hierarchy_derived "
+            "WHERE plant_id = :plant_id AND equipment_id IN (" + cols + ")"
+        )
+        out |= _distinct_signals_safe(db, sql, {"plant_id": plant_id, **named}, "dc_by_equip_chunk")
+    return out
+
+
+def _distinct_signals_raw_equipment_subquery(
+    db: Session, plant_id: str, equipment_ids_sql: str, tag: str
+) -> Set[str]:
+    """
+    Single query: DISTINCT signal for rows whose equipment_id is in a subquery.
+    equipment_ids_sql must be a SELECT that returns one column and only binds :plant_id.
+    """
+    sql = (
+        "SELECT DISTINCT r.signal FROM raw_data_generic r "
+        "WHERE r.plant_id = :plant_id AND r.equipment_id IN ( "
+        + equipment_ids_sql
+        + " ) LIMIT 500"
+    )
+    return _distinct_signals_safe(db, sql, {"plant_id": plant_id}, tag)
+
+
+def _distinct_signals_dc_equipment_subquery(
+    db: Session, plant_id: str, equipment_ids_sql: str, tag: str
+) -> Set[str]:
+    sql = (
+        "SELECT DISTINCT r.signal FROM dc_hierarchy_derived r "
+        "WHERE r.plant_id = :plant_id AND r.equipment_id IN ( "
+        + equipment_ids_sql
+        + " ) LIMIT 500"
+    )
+    return _distinct_signals_safe(db, sql, {"plant_id": plant_id}, tag)
+
+
+_SUBQ_INVERTER_IDS = (
+    "SELECT equipment_id FROM plant_equipment "
+    "WHERE plant_id = :plant_id AND LOWER(TRIM(equipment_level::text)) = 'inverter' "
+    "AND equipment_id IS NOT NULL "
+    "UNION SELECT inverter_id FROM plant_architecture "
+    "WHERE plant_id = :plant_id AND inverter_id IS NOT NULL"
+)
+
+_SUBQ_SCB_IDS = (
+    "SELECT equipment_id FROM plant_equipment "
+    "WHERE plant_id = :plant_id AND LOWER(TRIM(equipment_level::text)) = 'scb' "
+    "AND equipment_id IS NOT NULL "
+    "UNION SELECT scb_id FROM plant_architecture "
+    "WHERE plant_id = :plant_id AND scb_id IS NOT NULL"
+)
+
+_SUBQ_STRING_IDS = (
+    "SELECT equipment_id FROM plant_equipment "
+    "WHERE plant_id = :plant_id AND LOWER(TRIM(equipment_level::text)) = 'string' "
+    "AND equipment_id IS NOT NULL "
+    "UNION SELECT string_id FROM plant_architecture "
+    "WHERE plant_id = :plant_id AND string_id IS NOT NULL"
+)
 
 
 @router.get("/equipment", response_model=EquipmentListResponse)
@@ -322,110 +444,169 @@ def get_available_signals(
     from dashboard_cache import get_any, set_any
 
     level = _validate_level(level)
-    cache_key = f"analytics:signals:v3:{plant_id}:{level}"
+    # v8: single subquery per level (inverter no longer scans all SCB ids — was 20+ heavy DISTINCTs → timeout).
+    # v7: do not cache empty signal lists (avoids 5min "stuck" UI after a transient timeout).
+    cache_key = f"analytics:signals:v8:{plant_id}:{level}"
     cached = get_any(cache_key, 300)
     if cached is not None:
         return cached
 
+    sigs: Set[str] = set()
+
     if level == "wms":
-        sql = text("""
-            SELECT DISTINCT signal FROM raw_data_generic
+        wms_ids = _ids_simple(
+            db,
+            """
+            SELECT DISTINCT pe.equipment_id FROM plant_equipment pe
+            WHERE pe.plant_id = :plant_id
+              AND LOWER(TRIM(pe.equipment_level::text)) IN ('plant', 'wms')
+              AND pe.equipment_id IS NOT NULL
+            """,
+            plant_id,
+            "wms_pe",
+        )
+        raw_ids = _ids_simple(
+            db,
+            """
+            SELECT DISTINCT equipment_id FROM raw_data_generic
             WHERE plant_id = :plant_id
               AND LOWER(TRIM(equipment_level::text)) IN ('plant', 'wms')
-            ORDER BY signal
-        """)
-        try:
-            rows = db.execute(sql, {"plant_id": plant_id}).fetchall()
-        except Exception:
-            rows = []
-        signals = [r[0] for r in rows if r[0]]
-        out = {"signals": signals}
-        set_any(cache_key, out, 300)
-        return out
+              AND equipment_id IS NOT NULL
+            LIMIT 200
+            """,
+            plant_id,
+            "wms_raw_ids",
+        )
+        eq_ids = sorted({*wms_ids, *raw_ids, str(plant_id).strip()})
+        sigs |= _signals_raw_by_equipment_ids(db, plant_id, eq_ids)
+        if not sigs:
+            sigs |= _distinct_signals_safe(
+                db,
+                """
+                SELECT DISTINCT signal FROM raw_data_generic
+                WHERE plant_id = :plant_id
+                  AND LOWER(TRIM(equipment_level::text)) IN ('plant', 'wms')
+                LIMIT 400
+                """,
+                {"plant_id": plant_id},
+                "wms_level_cap",
+            )
+            sigs |= _distinct_signals_safe(
+                db,
+                """
+                SELECT DISTINCT signal FROM dc_hierarchy_derived
+                WHERE plant_id = :plant_id
+                  AND LOWER(TRIM(equipment_level::text)) IN ('plant', 'wms')
+                LIMIT 400
+                """,
+                {"plant_id": plant_id},
+                "wms_dc_level_cap",
+            )
 
-    if level == "inverter":
-        sql = text("""
-            SELECT DISTINCT signal
-            FROM raw_data_generic
-            WHERE plant_id = :plant_id
-              AND LOWER(TRIM(equipment_level::text)) = 'inverter'
-            UNION
-            SELECT DISTINCT signal
-            FROM raw_data_generic
-            WHERE plant_id = :plant_id
-              AND LOWER(TRIM(equipment_level::text)) = 'scb'
-            UNION
-            SELECT DISTINCT signal
-            FROM dc_hierarchy_derived
-            WHERE plant_id = :plant_id
-              AND LOWER(TRIM(equipment_level::text)) = 'inverter'
-            ORDER BY signal
-        """)
-        try:
-            rows = db.execute(sql, {"plant_id": plant_id}).fetchall()
-        except Exception:
-            rows = []
-        out = {"signals": [r[0] for r in rows if r[0]]}
-        set_any(cache_key, out, 300)
-        return out
+    elif level == "inverter":
+        # Inverter hierarchy lists inverter equipment only — discover signals on those IDs.
+        # Do NOT union every plant SCB (1000+) into chunked DISTINCT scans; that exceeded
+        # statement_timeout and returned empty parameters in Analytics Lab.
+        sigs |= _distinct_signals_raw_equipment_subquery(db, plant_id, _SUBQ_INVERTER_IDS, "inv_raw_subq")
+        sigs |= _distinct_signals_dc_equipment_subquery(db, plant_id, _SUBQ_INVERTER_IDS, "inv_dc_subq")
+        if not sigs:
+            # Mis-tagged rows (level set, equipment_id not in arch/PE) — capped to stay under statement_timeout
+            sigs |= _distinct_signals_safe(
+                db,
+                """
+                SELECT DISTINCT signal FROM raw_data_generic
+                WHERE plant_id = :plant_id
+                  AND LOWER(TRIM(equipment_level::text)) IN ('inverter', 'scb')
+                LIMIT 500
+                """,
+                {"plant_id": plant_id},
+                "inv_level_scan_cap",
+            )
+            sigs |= _distinct_signals_safe(
+                db,
+                """
+                SELECT DISTINCT signal FROM dc_hierarchy_derived
+                WHERE plant_id = :plant_id
+                  AND LOWER(TRIM(equipment_level::text)) IN ('inverter', 'scb')
+                LIMIT 500
+                """,
+                {"plant_id": plant_id},
+                "inv_dc_level_scan_cap",
+            )
 
-    # SCB / string: case-insensitive equipment_level (some plants use "String", "SCB", etc.).
-    # For string, also UNION signals for rows keyed by plant_architecture.string_id — PDCL-style
-    # uploads often tag per-string series as equipment_level scb (or other) while equipment_id is str01-01-22.
-    if level == "scb":
-        sql = text("""
+    elif level == "scb":
+        sigs |= _distinct_signals_raw_equipment_subquery(db, plant_id, _SUBQ_SCB_IDS, "scb_raw_subq")
+        sigs |= _distinct_signals_dc_equipment_subquery(db, plant_id, _SUBQ_SCB_IDS, "scb_dc_subq")
+        if not sigs:
+            sigs |= _distinct_signals_safe(
+                db,
+                """
+                SELECT DISTINCT signal FROM raw_data_generic
+                WHERE plant_id = :plant_id
+                  AND LOWER(TRIM(equipment_level::text)) = 'scb'
+                LIMIT 500
+                """,
+                {"plant_id": plant_id},
+                "scb_level_cap",
+            )
+            sigs |= _distinct_signals_safe(
+                db,
+                """
+                SELECT DISTINCT signal FROM dc_hierarchy_derived
+                WHERE plant_id = :plant_id
+                  AND LOWER(TRIM(equipment_level::text)) = 'scb'
+                LIMIT 500
+                """,
+                {"plant_id": plant_id},
+                "scb_dc_level_cap",
+            )
+
+    elif level == "string":
+        sigs |= _distinct_signals_raw_equipment_subquery(db, plant_id, _SUBQ_STRING_IDS, "str_raw_subq")
+        sigs |= _distinct_signals_dc_equipment_subquery(db, plant_id, _SUBQ_STRING_IDS, "str_dc_subq")
+        if not sigs:
+            sigs |= _distinct_signals_safe(
+                db,
+                """
+                SELECT DISTINCT signal FROM raw_data_generic
+                WHERE plant_id = :plant_id
+                  AND LOWER(TRIM(equipment_level::text)) = 'string'
+                LIMIT 500
+                """,
+                {"plant_id": plant_id},
+                "str_level_cap",
+            )
+            sigs |= _distinct_signals_safe(
+                db,
+                """
+                SELECT DISTINCT signal FROM dc_hierarchy_derived
+                WHERE plant_id = :plant_id
+                  AND LOWER(TRIM(equipment_level::text)) = 'string'
+                LIMIT 500
+                """,
+                {"plant_id": plant_id},
+                "str_dc_level_cap",
+            )
+
+    else:
+        return {"signals": []}
+
+    # Last resort: any signals for plant (bounded) so the Lab is usable if IDs diverge from arch/PE.
+    if not sigs:
+        sigs |= _distinct_signals_safe(
+            db,
+            """
             SELECT DISTINCT signal FROM raw_data_generic
-            WHERE plant_id = :plant_id
-              AND LOWER(TRIM(equipment_level::text)) = 'scb'
-            UNION
-            SELECT DISTINCT signal FROM dc_hierarchy_derived
-            WHERE plant_id = :plant_id
-              AND LOWER(TRIM(equipment_level::text)) = 'scb'
-            ORDER BY signal
-        """)
-        try:
-            rows = db.execute(sql, {"plant_id": plant_id}).fetchall()
-        except Exception:
-            rows = []
-        out = {"signals": [r[0] for r in rows if r[0]]}
-        set_any(cache_key, out, 300)
-        return out
+            WHERE plant_id = :plant_id AND signal IS NOT NULL
+            LIMIT 400
+            """,
+            {"plant_id": plant_id},
+            "plant_wide_fallback",
+        )
 
-    if level == "string":
-        sql = text("""
-            SELECT DISTINCT signal FROM raw_data_generic
-            WHERE plant_id = :plant_id
-              AND LOWER(TRIM(equipment_level::text)) = 'string'
-            UNION
-            SELECT DISTINCT r.signal FROM raw_data_generic r
-            WHERE r.plant_id = :plant_id
-              AND r.equipment_id IN (
-                SELECT DISTINCT string_id FROM plant_architecture
-                WHERE plant_id = :plant_id AND string_id IS NOT NULL
-              )
-            UNION
-            SELECT DISTINCT signal FROM dc_hierarchy_derived
-            WHERE plant_id = :plant_id
-              AND LOWER(TRIM(equipment_level::text)) = 'string'
-            UNION
-            SELECT DISTINCT d.signal FROM dc_hierarchy_derived d
-            WHERE d.plant_id = :plant_id
-              AND d.equipment_id IN (
-                SELECT DISTINCT string_id FROM plant_architecture
-                WHERE plant_id = :plant_id AND string_id IS NOT NULL
-              )
-            ORDER BY signal
-        """)
-        try:
-            rows = db.execute(sql, {"plant_id": plant_id}).fetchall()
-        except Exception:
-            rows = []
-        out = {"signals": [r[0] for r in rows if r[0]]}
+    out = {"signals": sorted(sigs)}
+    if sigs:
         set_any(cache_key, out, 300)
-        return out
-
-    out = {"signals": []}
-    set_any(cache_key, out, 300)
     return out
 
 

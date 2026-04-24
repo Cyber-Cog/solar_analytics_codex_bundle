@@ -20,7 +20,15 @@ from typing import List, Optional, Sequence
 from database import get_db, SessionLocal
 from db_perf import refresh_15m_cache
 from dashboard_cache import invalidate_plant as invalidate_dashboard_cache
-from models import PlantArchitecture, EquipmentSpec, RawDataGeneric, RawDataStats, PlantEquipment, User
+from models import (
+    PlantArchitecture,
+    EquipmentSpec,
+    RawDataGeneric,
+    RawDataStats,
+    PlantEquipment,
+    PlantComputeStatus,
+    User,
+)
 from schemas import ArchitectureRow, EquipmentSpecRow
 from auth.routes import get_current_user
 
@@ -143,6 +151,13 @@ def _post_upload_refresh(plant_id: str, min_ts: Optional[str], max_ts: Optional[
                 db.rollback()
             except Exception:
                 pass
+
+        try:
+            from jobs.enqueue import enqueue_precompute_after_ingest
+
+            enqueue_precompute_after_ingest(db, plant_id, min_ts, max_ts)
+        except Exception:
+            logging.getLogger(__name__).exception("enqueue_precompute_failed plant=%s", plant_id)
     finally:
         db.close()
 
@@ -732,15 +747,27 @@ def raw_data_summary(
     """Read from pre-computed raw_data_stats table — instant, no full table scan."""
     stats = db.query(RawDataStats).filter(RawDataStats.plant_id == plant_id).first()
     if not stats or not stats.total_rows:
-        return {"total_rows": 0, "date_range": None, "levels": {}}
+        return {"total_rows": 0, "date_range": None, "levels": {}, "module_precompute": None}
     try:
         levels = json.loads(stats.levels_json) if stats.levels_json else {}
     except Exception:
         levels = {}
+    pc = db.query(PlantComputeStatus).filter(PlantComputeStatus.plant_id == plant_id).first()
+    module_precompute = None
+    if pc:
+        module_precompute = {
+            "status": pc.status,
+            "started_at": pc.started_at.isoformat() if pc.started_at else None,
+            "finished_at": pc.finished_at.isoformat() if pc.finished_at else None,
+            "duration_seconds": pc.duration_seconds,
+            "error_message": pc.error_message,
+            "last_range": json.loads(pc.last_range_json) if pc.last_range_json else None,
+        }
     return {
         "total_rows": stats.total_rows,
         "date_range": {"from": stats.min_ts, "to": stats.max_ts} if stats.min_ts else None,
         "levels": levels,
+        "module_precompute": module_precompute,
     }
 
 

@@ -1,13 +1,18 @@
 import os
+import logging
+import time
 from datetime import date as _date
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from sqlalchemy import func
+from sqlalchemy.exc import OperationalError
 from typing import List, Optional, Tuple
+
+_log = logging.getLogger(__name__)
 from auth.routes import get_current_user
-from database import get_db, get_read_db
+from database import get_db, get_read_db, SessionLocal
 from db_perf import choose_data_table
 from soiling_queries import (
     build_plant_soiling_payload,
@@ -18,6 +23,12 @@ from soiling_queries import (
 )
 from models import User, FaultDiagnostics, FaultEpisode, EquipmentSpec, ScbFaultReview
 from fault_cache import get_cached
+from module_snapshots import (
+    get_ds_summary_snapshot,
+    save_ds_summary_snapshot,
+    get_unified_fault_snapshot,
+    save_unified_fault_snapshot,
+)
 from dashboard_cache import get as _dc_get, set as _dc_set
 from fault_runtime_snapshot import (
     KIND_PL_PAGE,
@@ -27,6 +38,7 @@ from fault_runtime_snapshot import (
     save_snapshot_payload,
 )
 from engine.communication_issue import get_communication_timeline, run_communication_issue
+from snap_perf import record_compute_ms, record_snapshot
 
 router = APIRouter(prefix="/api/faults", tags=["Faults"])
 
@@ -477,21 +489,15 @@ def _fallback_recurrence_map(session: Session, plant_id: str, scb_ids: list[str]
         for r in rows if r[0] and r[1]
     }
 
-@router.get("/ds-summary")
-def get_ds_summary(
-    plant_id: str = Query(...),
-    date_from: str = Query(default=None),
-    date_to: str = Query(default=None),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
+def build_ds_summary_dict(
+    db: Session,
+    plant_id: str,
+    date_from: Optional[str],
+    date_to: Optional[str],
+) -> dict:
     """
-    Returns high-level insights for the Dashboard:
-    - active_ds_faults (Current number of CONFIRMED_DS scbs in latest timestamp)
-    - total_disconnected_strings (Sum of missing strings for those faults)
-    - daily_energy_loss_kwh (Total energy loss for the current day/latest available day)
-    - top_affected_scbs (List of SCBs with highest energy loss)
-    Cached for faster repeat fetches; cache invalidated when new fault data is saved.
+    Core DS summary payload (same as `/api/faults/ds-summary` response body).
+    Used by the HTTP route (after DB snapshot miss) and by unified-feed precompute.
     """
     spare_scbs, total_scbs = _get_arch_spare_and_total(db, plant_id)
     latest_ts = _fault_latest_ts(db, plant_id, date_from, date_to)
@@ -512,13 +518,19 @@ def get_ds_summary(
     t_ts = f"{date_to} 23:59:59" if date_to else None
     communicating_scbs = 0
     if f_ts and t_ts:
-        comm_q = db.query(FaultDiagnostics.scb_id).filter(
+        try:
+            comm_q = db.query(FaultDiagnostics.scb_id).filter(
                 FaultDiagnostics.plant_id == plant_id,
-            FaultDiagnostics.timestamp >= f_ts,
-            FaultDiagnostics.timestamp <= t_ts,
-        ).distinct()
-        comm_ids = {r[0] for r in comm_q.all()}
-        communicating_scbs = len(comm_ids - spare_scbs)
+                FaultDiagnostics.timestamp >= f_ts,
+                FaultDiagnostics.timestamp <= t_ts,
+            ).distinct()
+            comm_ids = {r[0] for r in comm_q.all()}
+            communicating_scbs = len(comm_ids - spare_scbs)
+        except OperationalError as exc:
+            # Large fault_diagnostics without a matching (plant_id, timestamp) index can
+            # hit statement_timeout; keep the rest of the summary working.
+            _log.warning("communicating_scbs query skipped: %s", exc)
+            communicating_scbs = 0
 
     # Min(missing_strings) over range; exclude filter-summary SCBs so card matches table.
     range_min_map = _range_min_disconnected_strings(db, plant_id, date_from, date_to)
@@ -603,6 +615,31 @@ def get_ds_summary(
         "total_scbs": total_scbs,
         "communicating_scbs": communicating_scbs,
     }
+
+
+@router.get("/ds-summary")
+def get_ds_summary(
+    plant_id: str = Query(...),
+    date_from: str = Query(default=None),
+    date_to: str = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Returns high-level insights for the Dashboard.
+    Reads from `ds_summary_snapshot` when fresh vs `raw_data_stats.updated_at`, else computes and stores.
+    """
+    t0 = time.perf_counter()
+    hit = get_ds_summary_snapshot(db, plant_id, date_from or "", date_to or "")
+    if hit is not None:
+        record_snapshot("ds_summary", True)
+        record_compute_ms("ds_summary_http", (time.perf_counter() - t0) * 1000.0, f"hit plant={plant_id}")
+        return hit
+    record_snapshot("ds_summary", False)
+    out = build_ds_summary_dict(db, plant_id, date_from, date_to)
+    save_ds_summary_snapshot(db, plant_id, date_from or "", date_to or "", out)
+    record_compute_ms("ds_summary_http", (time.perf_counter() - t0) * 1000.0, f"miss plant={plant_id}")
+    return out
 
 def _serialize_fault_row(r):
     expected = r.expected_current or 0
@@ -1437,8 +1474,22 @@ def get_unified_fault_feed(
     current_user: User = Depends(get_current_user),
 ):
     """Single round-trip overview: aggregate tiles + normalized fault rows for the unified table."""
+    t0 = time.perf_counter()
     _from, _to = _fault_date_range(date_from, date_to)
-    return _unified_feed_rows_and_categories(db, plant_id, _from, _to, current_user)
+    cached = get_unified_fault_snapshot(db, plant_id, _from, _to)
+    if cached is not None:
+        record_snapshot("unified_feed", True)
+        record_compute_ms("unified_feed_http", (time.perf_counter() - t0) * 1000.0, f"hit plant={plant_id}")
+        return cached
+    record_snapshot("unified_feed", False)
+    out = _unified_feed_rows_and_categories(db, plant_id, _from, _to, current_user)
+    wdb = SessionLocal()
+    try:
+        save_unified_fault_snapshot(wdb, plant_id, _from, _to, out)
+    finally:
+        wdb.close()
+    record_compute_ms("unified_feed_http", (time.perf_counter() - t0) * 1000.0, f"miss plant={plant_id}")
+    return out
 
 
 @router.get("/comm-timeline")

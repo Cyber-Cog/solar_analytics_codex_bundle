@@ -1,18 +1,7 @@
 // Dashboard: Expected vs Actual generation (MWh) — from dashboard bundle + fault_cache snapshot; Loss Analysis bridge as fallback.
 const { useState, useEffect, useMemo } = React;
 const h = React.createElement;
-const {
-  ResponsiveContainer,
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-  Cell,
-  LabelList,
-} = window.Recharts || {};
+// Recharts removed during ECharts migration
 
 function _fmtMwh(v) {
   if (v == null || Number.isNaN(Number(v))) return '—';
@@ -100,7 +89,65 @@ window.DashboardTargetGeneration = ({ plantId, dateFrom, dateTo, targetGeneratio
     return (actualMwh / expectedMwh) * 100;
   }, [expectedMwh, actualMwh]);
 
-  const hasChart = chartData.length > 0 && ResponsiveContainer && BarChart;
+  const chartOption = useMemo(() => {
+    if (chartData.length === 0) return null;
+    return {
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'shadow' },
+        formatter: (params) => {
+          const val = params[0].value;
+          return `${params[0].name}<br/><span style="font-weight:bold">${Number(val).toLocaleString(undefined, { maximumFractionDigits: 3 })} MWh</span>`;
+        },
+        backgroundColor: 'var(--panel)',
+        borderColor: 'var(--line)',
+        textStyle: { color: 'var(--text)', fontSize: 13 },
+      },
+      grid: { top: 40, right: 16, bottom: 24, left: 56 },
+      xAxis: {
+        type: 'category',
+        data: chartData.map((r) => r.label),
+        axisLine: { lineStyle: { color: 'var(--line)' } },
+        axisTick: { show: false },
+        axisLabel: { color: 'var(--text-muted)', fontSize: 13, fontWeight: 600, margin: 12 },
+      },
+      yAxis: {
+        type: 'value',
+        name: 'MWh',
+        nameLocation: 'middle',
+        nameGap: 40,
+        nameTextStyle: { color: 'var(--text-muted)', fontSize: 12 },
+        max: yMax,
+        splitLine: { lineStyle: { type: 'dashed', color: 'var(--line)', opacity: 0.5 } },
+        axisLabel: { color: 'var(--text-soft)', fontSize: 12 },
+      },
+      series: [
+        {
+          type: 'bar',
+          data: chartData.map((r) => ({
+            value: r.mwh,
+            itemStyle: {
+              color: new window.echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                { offset: 0, color: r.fillKey === 'exp' ? '#38bdf8' : '#4ade80' },
+                { offset: 1, color: r.fillKey === 'exp' ? '#0369a1' : '#15803d' },
+              ]),
+              borderRadius: [6, 6, 0, 0],
+            },
+          })),
+          barMaxWidth: 140,
+          label: {
+            show: true,
+            position: 'top',
+            formatter: (p) => _fmtMwh(p.value),
+            color: 'var(--text)',
+            fontSize: 13,
+            fontWeight: 700,
+            distance: 8,
+          },
+        },
+      ],
+    };
+  }, [chartData, yMax]);
 
   return h(Card, {
     title: 'Expected vs actual generation (MWh)',
@@ -130,10 +177,8 @@ window.DashboardTargetGeneration = ({ plantId, dateFrom, dateTo, targetGeneratio
     }, `Actual / expected: ${ratioPct.toFixed(1)}%`),
     loading && h('div', { style: { padding: 36, textAlign: 'center', flex: 1 } }, h(Spinner)),
     err && !loading && h('div', { className: 'empty-state', style: { color: 'var(--bad)' } }, err),
-    !loading && !err && !hasChart && h('div', { className: 'empty-state' }, 'No data for this range.'),
-    // Explicit pixel height: ResponsiveContainer height="100%" collapses to 0 when the parent
-    // only has minHeight (no resolved height), which yields a blank chart while KPI text still shows.
-    !loading && !err && hasChart && h('div', {
+    !loading && !err && !chartOption && h('div', { className: 'empty-state' }, 'No data for this range.'),
+    !loading && !err && chartOption && h('div', {
       style: {
         width: '100%',
         height: 400,
@@ -144,71 +189,7 @@ window.DashboardTargetGeneration = ({ plantId, dateFrom, dateTo, targetGeneratio
         boxSizing: 'border-box',
       },
     },
-      h(ResponsiveContainer, { width: '100%', height: 400 },
-        h(BarChart, {
-          data: chartData,
-          margin: { top: 28, right: 16, left: 4, bottom: 4 },
-          barCategoryGap: '28%',
-        },
-          h('defs', null,
-            h('linearGradient', { id: 'dashBarExpected', x1: '0', y1: '0', x2: '0', y2: '1' },
-              h('stop', { offset: '0%', stopColor: '#38bdf8', stopOpacity: 1 }),
-              h('stop', { offset: '100%', stopColor: '#0369a1', stopOpacity: 0.92 }),
-            ),
-            h('linearGradient', { id: 'dashBarActual', x1: '0', y1: '0', x2: '0', y2: '1' },
-              h('stop', { offset: '0%', stopColor: '#4ade80', stopOpacity: 1 }),
-              h('stop', { offset: '100%', stopColor: '#15803d', stopOpacity: 0.9 }),
-            ),
-          ),
-          h(CartesianGrid, { strokeDasharray: '3 3', stroke: 'var(--line)', vertical: false }),
-          h(XAxis, {
-            dataKey: 'label',
-            tick: { fill: 'var(--text-muted)', fontSize: 12, fontWeight: 600 },
-            axisLine: { stroke: 'var(--line)' },
-            tickLine: false,
-          }),
-          h(YAxis, {
-            domain: [0, yMax],
-            tick: { fill: 'var(--text-soft)', fontSize: 11 },
-            axisLine: false,
-            tickLine: false,
-            width: 48,
-            label: {
-              value: 'MWh',
-              angle: -90,
-              position: 'insideLeft',
-              fill: 'var(--text-muted)',
-              fontSize: 11,
-            },
-          }),
-          h(Tooltip, {
-            formatter: (v) => [`${Number(v).toLocaleString(undefined, { maximumFractionDigits: 3 })} MWh`, ''],
-            contentStyle: { background: 'var(--panel)', border: '1px solid var(--line)', borderRadius: 8 },
-          }),
-          h(Legend, { wrapperStyle: { fontSize: 11, paddingTop: 4 } }),
-          h(Bar, {
-            dataKey: 'mwh',
-            name: 'Energy (MWh)',
-            radius: [10, 10, 4, 4],
-            maxBarSize: 140,
-          },
-            chartData.map((row, i) =>
-              h(Cell, {
-                key: i,
-                fill: row.fillKey === 'exp' ? 'url(#dashBarExpected)' : 'url(#dashBarActual)',
-              }),
-            ),
-            LabelList && h(LabelList, {
-              dataKey: 'mwh',
-              position: 'top',
-              fill: 'var(--text)',
-              fontSize: 13,
-              fontWeight: 700,
-              formatter: (v) => _fmtMwh(v),
-            }),
-          ),
-        ),
-      ),
+      h(window.EChart, { option: chartOption, style: { width: '100%', height: 380 } })
     ),
   );
 };

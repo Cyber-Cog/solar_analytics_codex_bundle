@@ -2,7 +2,7 @@
 const { useState, useEffect, useCallback, useMemo } = React;
 const h = React.createElement;
 const { Card } = window;
-const { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Cell, ReferenceLine } = window.Recharts || {};
+// Recharts explicitly removed during ECharts migration
 
 function fmtMwh(v) {
   if (v == null || Number.isNaN(v)) return '—';
@@ -241,49 +241,108 @@ window.LossAnalysisPage = ({ plantId, dateFrom, dateTo }) => {
         ),
       ),
       loadingBridge && h('div', { style: { padding: 20, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 } }, 'Loading energy bridge…'),
-      !loadingBridge && primary && bridgeChartData.length > 0 && ResponsiveContainer && h(ResponsiveContainer, { width: '100%', height: 400 },
-        h(BarChart, { data: bridgeChartData, margin: { top: 16, right: 16, left: 8, bottom: 72 } },
-          h(CartesianGrid, { strokeDasharray: '3 3', stroke: 'var(--line)' }),
-          h(XAxis, {
-            dataKey: 'label',
-            tick: { fontSize: 8, fill: 'var(--text-muted)' },
-            interval: 0,
-            angle: -40,
-            textAnchor: 'end',
-            height: 78,
-          }),
-          h(YAxis, {
-            tick: { fontSize: 10, fill: 'var(--text-soft)' },
-            label: { value: yAxisLabel, angle: -90, position: 'insideLeft', fill: 'var(--text-muted)', fontSize: 10 },
-          }),
-          h(Tooltip, { content: bridgeTooltip }),
-          h(ReferenceLine, { y: 0, stroke: 'var(--line)' }),
-          h(Bar, {
-            dataKey: '_inv',
-            stackId: 'wf',
-            fill: 'rgba(0,0,0,0)',
-            stroke: 'none',
-            isAnimationActive: false,
-          }),
-          h(Bar, { dataKey: '_vis', stackId: 'wf', name: 'Step', isAnimationActive: false },
-            bridgeChartData.map((entry, i) => h(Cell, { key: i, fill: bridgeSegmentFill(entry) })),
-          ),
-        ),
-      ),
-      !loadingBridge && primary && bridgeChartData.length > 0 && !ResponsiveContainer && h('div', { className: 'empty-state' }, 'Charts require Recharts.'),
+      !loadingBridge && primary && bridgeChartData.length > 0 && (() => {
+        const option = {
+          tooltip: {
+            trigger: 'axis',
+            axisPointer: { type: 'shadow' },
+            backgroundColor: 'var(--panel)',
+            borderColor: 'var(--line)',
+            textStyle: { color: 'var(--text)' },
+            formatter: function (params) {
+               if (!params || !params.length) return '';
+               const row = params[1] ? params[1].data.raw : params[0].data.raw;
+               const visRaw = Number(row.visible_mwh || 0);
+               let pct = '';
+               if (expBase > 0) {
+                 pct = `<div style="font-size: 11px; color: var(--text-muted); margin-top:4px">${((visRaw / expBase) * 100).toFixed(2)}% of expected</div>`;
+               }
+               return `<div style="font-weight: 600; margin-bottom: 6px">${row.label}</div>
+                       <div style="font-size: 12px">Step: <b>${visRaw.toFixed(3)} MWh</b></div>${pct}`;
+            }
+          },
+          grid: { top: 20, right: 20, left: 60, bottom: 85 },
+          xAxis: {
+            type: 'category',
+            data: bridgeChartData.map(d => d.label),
+            axisLabel: { fontSize: 9, color: 'var(--text-muted)', interval: 0, rotate: 40 },
+            axisLine: { lineStyle: { color: 'var(--line)' } },
+            axisTick: { show: false }
+          },
+          yAxis: {
+            type: 'value',
+            name: yAxisLabel,
+            nameLocation: 'middle',
+            nameGap: 45,
+            nameTextStyle: { color: 'var(--text-muted)', fontSize: 11 },
+            axisLabel: { fontSize: 10, color: 'var(--text-soft)' },
+            splitLine: { lineStyle: { type: 'dashed', color: 'var(--line)' } }
+          },
+          series: [
+            {
+              type: 'bar',
+              stack: 'wf',
+              itemStyle: { color: 'rgba(0,0,0,0)', borderColor: 'rgba(0,0,0,0)' },
+              data: bridgeChartData.map(d => ({ value: d._inv, raw: d })),
+              animation: false
+            },
+            {
+              type: 'bar',
+              stack: 'wf',
+              data: bridgeChartData.map(d => ({
+                value: d._vis,
+                itemStyle: { color: bridgeSegmentFill(d) },
+                raw: d
+              })),
+              animation: false
+            }
+          ]
+        };
+        return h(window.EChart, { style: { width: '100%', height: 400 }, option: option });
+      })(),
       !loadingBridge && primary && !bridgeChartData.length && !err && h('div', { className: 'empty-state' }, 'No bridge data for this range.'),
     ),
 
     !loadingBridge && primary && worst.length > 0 && h(Card, { title: 'Worst unknown loss (top 10)' },
-      ResponsiveContainer && h(ResponsiveContainer, { width: '100%', height: 260 },
-        h(BarChart, { layout: 'vertical', data: worst, margin: { left: 100, right: 16 } },
-          h(CartesianGrid, { strokeDasharray: '3 3' }),
-          h(XAxis, { type: 'number', tick: { fontSize: 10 } }),
-          h(YAxis, { type: 'category', dataKey: 'label', width: 96, tick: { fontSize: 10 } }),
-          h(Tooltip, { formatter: (v) => fmtMwh(v) }),
-          h(Bar, { dataKey: 'unknown_mwh', fill: '#a855f7', radius: [0, 4, 4, 0] }),
-        ),
-      ),
+      (() => {
+        const worstOption = {
+          tooltip: {
+            trigger: 'axis',
+            axisPointer: { type: 'shadow' },
+            backgroundColor: 'var(--panel)',
+            borderColor: 'var(--line)',
+            textStyle: { color: 'var(--text)' },
+            formatter: (params) => {
+              if (!params || !params.length) return '';
+              const r = params[0];
+              return `<div style="font-weight: bold; margin-bottom: 4px;">${r.name}</div>
+                      <div>${fmtMwh(r.value)}</div>`;
+            }
+          },
+          grid: { top: 10, right: 20, left: 110, bottom: 20 },
+          xAxis: {
+            type: 'value',
+            axisLabel: { color: 'var(--text-soft)', fontSize: 10 },
+            splitLine: { lineStyle: { type: 'dashed', color: 'rgba(255,255,255,0.06)' } }
+          },
+          yAxis: {
+            type: 'category',
+            data: worst.map(d => d.label),
+            axisLabel: { color: 'var(--text-soft)', fontSize: 10, width: 96, overflow: 'truncate' },
+            axisLine: { lineStyle: { color: 'var(--line)' } },
+            axisTick: { show: false }
+          },
+          series: [
+            {
+              type: 'bar',
+              data: worst.map(d => d.unknown_mwh),
+              itemStyle: { color: '#a855f7', borderRadius: [0, 4, 4, 0] },
+              barMaxWidth: 30
+            }
+          ]
+        };
+        return h(window.EChart, { style: { width: '100%', height: 260 }, option: worstOption });
+      })()
     ),
 
     !loadingBridge && tableRows.length > 0 && window.DataTable && h(Card, { title: 'Detail table' },

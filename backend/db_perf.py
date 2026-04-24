@@ -198,7 +198,7 @@ def choose_data_table(db, plant_id: str, date_from: str, date_to: str) -> str:
 
 
 def refresh_15m_cache(db, plant_id: str, min_ts: str, max_ts: str) -> None:
-    """Invalidate dashboard and fault caches after new telemetry uploads."""
+    """Invalidate dashboard and fault caches after new telemetry uploads, and refresh materialized views."""
     try:
         from dashboard_cache import invalidate_plant
 
@@ -219,6 +219,18 @@ def refresh_15m_cache(db, plant_id: str, min_ts: str, max_ts: str) -> None:
             db.rollback()
         except Exception:
             pass
+
+    # Refresh materialized pivot views concurrently (doesn't block ongoing SELECTs)
+    try:
+        from sqlalchemy import text as _t
+        # Need to commit any open transaction first since CONCURRENTLY cannot run inside a transaction block
+        db.commit() 
+        # In SQLAlchemy with psycopg2, running out of transaction blocks usually requires execution options
+        for view in ['mv_inverter_power_1min', 'mv_weather_1min', 'mv_string_current_1min']:
+            db.execute(_t(f"REFRESH MATERIALIZED VIEW CONCURRENTLY {view}").execution_options(autocommit=True))
+        logger.info(f"db_perf.refresh_15m_cache: Materialized Views Refreshed successfully.")
+    except Exception as e:
+        logger.error(f"Failed to refresh materialized views: {e}")
 
     logger.info(
         "db_perf.refresh_15m_cache: cache invalidated for plant=%s range=%s->%s",

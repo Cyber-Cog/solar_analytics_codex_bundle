@@ -11,16 +11,16 @@ from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 
 from database import get_db
 from models import (
     User, Plant, RawDataGeneric, DCHierarchyDerived, PlantArchitecture,
     EquipmentSpec, SupportTicket, FaultDiagnostics, FaultEpisode,
     FaultEpisodeDay, PlantEquipment, RawDataStats, ScbFaultReview,
-    FaultRuntimeSnapshot, FaultCache,
+    FaultRuntimeSnapshot, FaultCache, PrecomputeJob,
 )
 from schemas import UserCreate, UserUpdate, UserResponse, MessageResponse
 from auth.routes import get_current_user
@@ -223,3 +223,101 @@ def update_site_appearance(
         db.add(FaultCache(cache_key=SITE_APPEARANCE_KEY, payload=json.dumps(body)))
     db.commit()
     return {"ok": True, "org_default_theme": canon, "updated_at": body["updated_at"]}
+
+
+# -- Analytics precompute (durable queue; worker: `python -m jobs.precompute_runner --once`) --
+
+
+class PrecomputeEnqueueBody(BaseModel):
+    """Queue DS summary + unified fault + loss + fault-tab snapshots for a date range."""
+
+    plant_id: Optional[str] = Field(
+        default=None,
+        description="If omitted, all plants (uses each plant's raw_data_stats bounds when dates omitted).",
+    )
+    date_from: Optional[str] = Field(default=None, description="YYYY-MM-DD; optional with date_to")
+    date_to: Optional[str] = Field(default=None, description="YYYY-MM-DD; optional with date_from")
+    chunk_days: int = Field(
+        default=62,
+        ge=0,
+        le=366,
+        description="Split range into N-day jobs (0 = one job per plant for full range).",
+    )
+
+
+@router.get("/precompute/queue")
+def get_precompute_queue(
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_admin),
+    limit: int = Query(30, ge=1, le=200),
+):
+    """Counts and recent precompute_jobs rows (pending / running / done / failed)."""
+    pending = db.query(PrecomputeJob).filter(PrecomputeJob.status == "pending").count()
+    running = db.query(PrecomputeJob).filter(PrecomputeJob.status == "running").count()
+    recent = (
+        db.query(PrecomputeJob)
+        .order_by(PrecomputeJob.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "pending": pending,
+        "running": running,
+        "worker_hint": "From backend/: python -m jobs.precompute_runner --once --max-jobs 20  (re-run or schedule until pending=0)",
+        "recent_jobs": [
+            {
+                "id": j.id,
+                "plant_id": j.plant_id,
+                "date_from": j.date_from,
+                "date_to": j.date_to,
+                "status": j.status,
+                "attempts": j.attempts,
+                "error_message": (j.error_message or "")[:500] or None,
+                "created_at": j.created_at.isoformat() if j.created_at else None,
+                "updated_at": j.updated_at.isoformat() if j.updated_at else None,
+            }
+            for j in recent
+        ],
+    }
+
+
+@router.post("/precompute/enqueue")
+def enqueue_precompute_historical(
+    payload: PrecomputeEnqueueBody,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_admin),
+):
+    """
+    Enqueue one or more snapshot jobs in `precompute_jobs` (no merge — supports historical chunks).
+
+    Processes DS summary, unified feed, loss bridge, and fault tab caches
+    (via `module_precompute.compute_snapshots_for_range` + underlying engines).
+    """
+    if os.environ.get("SOLAR_MODULE_PRECOMPUTE", "1").strip().lower() in ("0", "false", "no"):
+        raise HTTPException(
+            status_code=400,
+            detail="Module precompute is disabled (SOLAR_MODULE_PRECOMPUTE=0). Enable it to enqueue jobs.",
+        )
+    if bool(payload.date_from) != bool(payload.date_to):
+        raise HTTPException(
+            status_code=400,
+            detail="Provide both date_from and date_to, or leave both empty to use each plant's raw data bounds.",
+        )
+    from jobs.enqueue import enqueue_historical_backfill
+
+    try:
+        out = enqueue_historical_backfill(
+            db,
+            plant_id=(payload.plant_id or None),
+            date_from=payload.date_from,
+            date_to=payload.date_to,
+            chunk_days=payload.chunk_days,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if out.get("jobs_enqueued", 0) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No jobs were enqueued. Check that plants exist and raw_data_stats has min_ts/max_ts for the selected plant(s), or pass explicit date_from and date_to.",
+        )
+    return {**out, "worker_hint": "Run: python -m jobs.precompute_runner --once --max-jobs 20 (from the backend/ folder)"}

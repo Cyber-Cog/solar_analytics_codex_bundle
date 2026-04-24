@@ -54,6 +54,8 @@ from db_perf import ensure_performance_objects, ensure_performance_objects_bg
 from models import (
     User, Plant, RawDataGeneric, DCHierarchyDerived,
     PlantArchitecture, EquipmentSpec, SupportTicket, RawDataStats, PlantEquipment,
+    DsSummarySnapshot, UnifiedFaultSnapshot, LossAnalysisSnapshot, PlantComputeStatus,
+    PrecomputeJob,
 )
 
 # ── Router Imports ─────────────────────────────────────────────────────────────
@@ -88,8 +90,14 @@ def _ensure_equipment_spec_loss_columns():
 # ── Create all tables on startup (safe: only creates if not exists) ───────────
 # Skip schema writes in serverless mode. Vercel Functions should boot fast and
 # should not depend on running DDL successfully during module import.
-if not IS_SERVERLESS:
+# Production: set SOLAR_SKIP_CREATE_ALL=1 and manage schema with Alembic only
+# (`cd backend && alembic upgrade head`).
+_skip_create = os.environ.get("SOLAR_SKIP_CREATE_ALL", "").strip().lower() in ("1", "true", "yes")
+if not IS_SERVERLESS and not _skip_create:
     Base.metadata.create_all(bind=engine)
+elif not IS_SERVERLESS and _skip_create:
+    print("[schema] SOLAR_SKIP_CREATE_ALL=1 — skipping create_all (use Alembic)")
+if not IS_SERVERLESS:
     _ensure_equipment_spec_loss_columns()
 
 # ── Apply pending SAFE migrations (migrations/sql/*.sql) ──────────────────────

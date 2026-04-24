@@ -13,6 +13,9 @@ from sqlalchemy import text
 from typing import Any, Dict, List, Optional
 from datetime import datetime, date
 import math
+import logging
+
+logger = logging.getLogger(__name__)
 
 from database import get_db, get_read_db
 from db_perf import choose_data_table
@@ -38,6 +41,13 @@ from ac_power_energy_sql import (
 from dashboard_helpers import (
     resolve_dashboard_date_range,
 )
+from dashboard_mv_sql import (
+    sql_mv_inverter_performance,
+    sql_mv_weather_timeline,
+    sql_mv_power_vs_gti,
+    sql_mv_plant_ac_daily_energy,
+)
+import time
 
 router = APIRouter(prefix="/api/dashboard", tags=["Dashboard"])
 
@@ -486,10 +496,24 @@ def energy_generation(
 ):
     """Daily actual energy generation compared to a simple capacity-based target."""
     _from, _to = _default_range(date_from, date_to)
+    cached = cache_get("energy_v1", plant_id, _from, _to)
+    if cached is not None:
+        return cached
+
+    start_time = time.time()
     f_ts, t_ts = f"{_from} 00:00:00", f"{_to} 23:59:59"
-    table = choose_data_table(db, plant_id, _from, _to)
-    sql = text(sql_plant_ac_daily_energy(table))
-    rows = db.execute(sql, {"plant_id": plant_id, "from_ts": f_ts, "to_ts": t_ts}).fetchall()
+    
+    # Try Materialized View first
+    view_exists = db.execute(text("SELECT 1 FROM pg_matviews WHERE matviewname = 'mv_inverter_power_1min'")).fetchone()
+    if view_exists:
+        sql = text(sql_mv_plant_ac_daily_energy())
+        rows = db.execute(sql, {"plant_id": plant_id, "from_ts": f_ts, "to_ts": t_ts}).fetchall()
+        logger.info(f"Dashboard /energy hit Materialized View in {time.time() - start_time:.4f}s")
+    else:
+        table = choose_data_table(db, plant_id, _from, _to)
+        sql = text(sql_plant_ac_daily_energy(table))
+        rows = db.execute(sql, {"plant_id": plant_id, "from_ts": f_ts, "to_ts": t_ts}).fetchall()
+        logger.info(f"Dashboard /energy hit {table} in {time.time() - start_time:.4f}s")
 
     plant = db.query(Plant).filter(Plant.plant_id == plant_id).first()
     cap   = (plant.capacity_mwp * 1000) if (plant and plant.capacity_mwp) else None
@@ -505,6 +529,10 @@ def energy_generation(
             actual_mwh = round(actual_kwh / 1000, 3) if actual_kwh is not None else None,
             target_mwh = round(target_kwh / 1000, 3) if target_kwh is not None else None,
         ))
+    
+    # Store plain dictionaries in the cache
+    payload = [r.dict() for r in result]
+    cache_set("energy_v1", plant_id, _from, _to, payload)
     return result
 
 
@@ -519,7 +547,31 @@ def weather_data(
 ):
     """Return WMS weather time-series for the selected plant."""
     _from, _to = _default_range(date_from, date_to)
+    cached = cache_get("weather_v1", plant_id, _from, _to)
+    if cached is not None:
+        return cached
+
+    start_time = time.time()
+    
+    view_exists = db.execute(text("SELECT 1 FROM pg_matviews WHERE matviewname = 'mv_weather_1min'")).fetchone()
+    if view_exists:
+        sql = text(sql_mv_weather_timeline())
+        rows = db.execute(sql, {"plant_id": plant_id, "f": f"{_from} 00:00:00", "t": f"{_to} 23:59:59"}).fetchall()
+        logger.info(f"Dashboard /weather hit Materialized View in {time.time() - start_time:.4f}s")
+        return [
+            WeatherDataPoint(
+                timestamp    = _as_json_str(r.timestamp),
+                ghi          = r.ghi,
+                gti          = r.gti,
+                ambient_temp = r.ambient_temp,
+                module_temp  = r.module_temp,
+                wind_speed   = r.wind_speed,
+            )
+            for r in rows
+        ]
+
     table = choose_data_table(db, plant_id, _from, _to)
+    logger.info(f"Dashboard /weather fallback to {table}")
 
     sql = text(f"""
         SELECT timestamp,
@@ -562,6 +614,10 @@ def kpis(
 ):
     """Return aggregate KPI values for the selected date range."""
     _from, _to  = _default_range(date_from, date_to)
+    cached = cache_get("kpis_v1", plant_id, _from, _to)
+    if cached is not None:
+        return cached
+
     f_ts, t_ts = f"{_from} 00:00:00", f"{_to} 23:59:59"
     table = choose_data_table(db, plant_id, _from, _to)
 
@@ -594,7 +650,7 @@ def kpis(
 
     total_mwh = round(total_kwh / 1000, 2) if total_kwh else None
 
-    return KPIData(
+    result = KPIData(
         energy_export_kwh              = total_kwh,
         net_generation_kwh             = total_kwh,
         energy_export_mwh               = total_mwh,
@@ -607,6 +663,8 @@ def kpis(
         total_inverter_generation_kwh  = total_kwh,
         insolation_kwh_m2              = insolation_kwh_m2,
     )
+    cache_set("kpis_v1", plant_id, _from, _to, result.dict())
+    return result
 
 
 # ── WMS KPIs ──────────────────────────────────────────────────────────────────
@@ -620,9 +678,14 @@ def wms_kpis(
 ):
     """WMS KPIs: insolation kWh/m² (Σ W/m² / 60000 for 1-min data), mean irradiance W/m², temps, wind."""
     _from, _to = _default_range(date_from, date_to)
+    cached = cache_get("wmskpis_v1", plant_id, _from, _to)
+    if cached is not None:
+        return cached
+
     table = choose_data_table(db, plant_id, _from, _to)
     f_ts, t_ts = f"{_from} 00:00:00", f"{_to} 23:59:59"
     payload = _wms_kpis_payload(db, table, plant_id, f_ts, t_ts)
+    cache_set("wmskpis_v1", plant_id, _from, _to, payload)
     return WMSKPIData(**payload)
 
 
@@ -637,10 +700,35 @@ def inverter_performance(
 ):
     """Return average DC/AC power per inverter for the date range (+ PLF)."""
     _from, _to = _default_range(date_from, date_to)
-    table = choose_data_table(db, plant_id, _from, _to)
+    cached = cache_get("invperf_v1", plant_id, _from, _to)
+    if cached is not None:
+        return cached
+
+    start_time = time.time()
     f_ts, t_ts = f"{_from} 00:00:00", f"{_to} 23:59:59"
-    rows = _inverter_performance_table(db, table, plant_id, f_ts, t_ts, _from, _to)
-    return [
+
+    view_exists = db.execute(text("SELECT 1 FROM pg_matviews WHERE matviewname = 'mv_inverter_power_1min'")).fetchone()
+    if view_exists:
+        sql = text(sql_mv_inverter_performance(plant_id))
+        rows_raw = db.execute(sql, {"plant_id": plant_id, "f": f_ts, "t": t_ts}).fetchall()
+        # Convert Row objects to dicts for helper
+        rows = []
+        for r in rows_raw:
+            rows.append({
+                "inverter_id": r.equipment_id,
+                "dc_power": r.dc_power,
+                "ac_power": r.ac_power,
+                "energy_kwh": r.energy_kwh,
+                "dc_capacity_kw": r.dc_cap_kw
+            })
+        from dashboard_helpers import finalize_inverter_rows
+        rows = finalize_inverter_rows(db, plant_id, rows, _from, _to)
+        logger.info(f"Dashboard /inverter-performance hit Materialized View in {time.time() - start_time:.4f}s")
+    else:
+        table = choose_data_table(db, plant_id, _from, _to)
+        rows = _inverter_performance_table(db, table, plant_id, f_ts, t_ts, _from, _to)
+        logger.info(f"Dashboard /inverter-performance hit {table} in {time.time() - start_time:.4f}s")
+    result = [
         InverterRow(
             inverter_id=r["inverter_id"],
             dc_power_kw=r.get("dc_power_kw"),
@@ -654,6 +742,9 @@ def inverter_performance(
         )
         for r in rows
     ]
+    payload = [r.dict() for r in result]
+    cache_set("invperf_v1", plant_id, _from, _to, payload)
+    return result
 
 
 # ── Active Power vs GTI ───────────────────────────────────────────────────────
@@ -667,10 +758,19 @@ def power_vs_gti(
 ):
     """Return time-series of total active power and GTI for charting (full selected date span)."""
     _from, _to = _default_range(date_from, date_to)
-    table = choose_data_table(db, plant_id, _from, _to)
+    start_time = time.time()
     lim = _power_vs_gti_row_limit(_from, _to)
-    sql = text(_sql_power_vs_gti(table, lim))
-    rows = db.execute(sql, {"plant_id": plant_id, "f": f"{_from} 00:00:00", "t": f"{_to} 23:59:59"}).fetchall()
+
+    view_exists = db.execute(text("SELECT 1 FROM pg_matviews WHERE matviewname = 'mv_inverter_power_1min'")).fetchone()
+    if view_exists:
+        sql = text(sql_mv_power_vs_gti())
+        rows = db.execute(sql, {"plant_id": plant_id, "f": f"{_from} 00:00:00", "t": f"{_to} 23:59:59", "limit": lim}).fetchall()
+        logger.info(f"Dashboard /power-vs-gti hit Materialized View in {time.time() - start_time:.4f}s")
+    else:
+        table = choose_data_table(db, plant_id, _from, _to)
+        sql = text(_sql_power_vs_gti(table, lim))
+        rows = db.execute(sql, {"plant_id": plant_id, "f": f"{_from} 00:00:00", "t": f"{_to} 23:59:59"}).fetchall()
+        logger.info(f"Dashboard /power-vs-gti hit {table} in {time.time() - start_time:.4f}s")
     return [
         PowerVsGTIPoint(
             timestamp      = _as_json_str(r.timestamp),

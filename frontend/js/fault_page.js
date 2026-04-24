@@ -166,6 +166,14 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
   /** Start true so Overview first paint shows loading, not a blank gap before the effect runs. */
   const [unifiedLoading, setUnifiedLoading] = useState(true);
   const [unifiedErr, setUnifiedErr] = useState(null);
+
+  function isLikelyRequestAbort(e) {
+    if (!e) return false;
+    if (e.name === 'AbortError') return true;
+    const m = String(e.message || e);
+    if (/aborted|route change/i.test(m)) return true;
+    return false;
+  }
   const [metricToggle, setMetricToggle] = useState('mwh');
   const [ufEquipQ, setUfEquipQ] = useState('');
   const [ufLossMin, setUfLossMin] = useState('');
@@ -198,6 +206,10 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
       })
       .catch((e) => {
         if (!cancelled) {
+          if (isLikelyRequestAbort(e)) {
+            setUnifiedErr(null);
+            return;
+          }
           setUnifiedErr(e.message || String(e));
           setUnifiedFeed(null);
         }

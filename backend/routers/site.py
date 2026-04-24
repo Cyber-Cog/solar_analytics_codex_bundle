@@ -1,4 +1,4 @@
-﻿"""
+"""
 Public site configuration (no secrets) — appearance defaults for all clients.
 """
 
@@ -21,12 +21,13 @@ router = APIRouter(prefix="/api/site", tags=["Site"])
 SITE_APPEARANCE_KEY = "site:appearance:v1"
 
 DEFAULT_APPEARANCE: dict[str, Any] = {
-    "org_default_theme": "dark_ocean",
+    "org_default_theme": "photon",
     "updated_at": None,
 }
 
 ALLOWED_ORG_THEMES = frozenset(
     {
+        "photon",
         "dark_ocean",
         "dark_ink",
         "dark_forest",
@@ -41,13 +42,13 @@ ALLOWED_ORG_THEMES = frozenset(
 
 
 def _normalize_theme_id(raw: Optional[str]) -> str:
-    t = (raw or "").strip() or "dark_ocean"
+    t = (raw or "").strip() or "photon"
     if t == "dark":
         return "dark_ocean"
     if t == "light":
         return "light_paper"
     if t not in ALLOWED_ORG_THEMES:
-        return "dark_ocean"
+        return "photon"
     return t
 
 

@@ -306,17 +306,21 @@
 ═══════════════════════════════════════════════════════ */
 
 .date-presets {
-  display: flex; align-items: center; gap: 4px; flex-wrap: nowrap;
+  display: flex; align-items: center; gap: 3px; flex-wrap: nowrap;
+}
+
+.topbar .date-presets {
+  gap: 2px;
 }
 
 .date-preset-btn {
-  padding: 4px 9px;
+  padding: 3px 6px;
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: 6px;
   background: var(--panel-2, rgba(255,255,255,0.03));
   color: var(--text-muted);
   font-family: var(--font,'Inter',sans-serif);
-  font-size: 10px; font-weight: 700;
+  font-size: 9px; font-weight: 700;
   cursor: pointer; white-space: nowrap;
   transition: all 0.14s ease;
   line-height: 1.2;
@@ -341,6 +345,11 @@
   border-radius: 50%; background: #34c889;
   flex-shrink: 0;
   animation: pulseStatusDot 3.2s ease infinite;
+}
+
+body.theme-photon .sidebar-plant-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.35);
 }
 
 /* ═══════════════════════════════════════════════════════

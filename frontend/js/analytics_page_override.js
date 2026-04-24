@@ -176,6 +176,7 @@
     const [loading, setLoading] = useState(false);
     const [equipLoading, setEquipLoading] = useState(false);
     const [signalLoading, setSignalLoading] = useState(false);
+    const [lastSignalApiErrors, setLastSignalApiErrors] = useState([]);
     const [hiddenLines, setHiddenLines] = useState([]);
     const [scbMetadata, setScbMetadata] = useState(null);
     const equipSigReqRef = useRef(0);
@@ -264,6 +265,10 @@
         });
 
         const mergedSignals = sortSignals([...signalSet]);
+        const sigErrs = results
+          .map((r) => (r._sigErr ? `${r.level}: ${String((r._sigErr && r._sigErr.message) || r._sigErr)}` : null))
+          .filter(Boolean);
+        setLastSignalApiErrors(sigErrs);
         setPickerItems(items);
         setAvailableSignals(mergedSignals);
         setSelected(prev => prev.filter(k => seenKeys.has(k)));
@@ -311,6 +316,7 @@
 
       setEquipLoading(true);
       setSignalLoading(true);
+      setLastSignalApiErrors([]);
       setTsData([]);
       setAvail(0);
       setHiddenLines([]);
@@ -672,7 +678,8 @@
                 fontSize: 13,
                 padding: '6px 8px',
                 borderRadius: 6,
-                background: selectedLevels.includes(item.id) ? 'rgba(14,165,233,0.08)' : 'transparent',
+                background: selectedLevels.includes(item.id) ? 'var(--accent-soft)' : 'transparent',
+                border: selectedLevels.includes(item.id) ? '1px solid var(--accent-strong)' : '1px solid transparent',
               },
             },
               h('input', {
@@ -683,7 +690,7 @@
               h('span', {
                 style: {
                   fontWeight: selectedLevels.includes(item.id) ? 700 : 400,
-                  color: selectedLevels.includes(item.id) ? 'var(--accent)' : 'var(--text-primary)',
+                  color: selectedLevels.includes(item.id) ? 'var(--accent)' : 'var(--text)',
                 },
               }, item.label.toUpperCase()),
             )),
@@ -708,7 +715,20 @@
             signalLoading
               ? h('div', { className: 'empty-state', style: { minHeight: 80 } }, h(Spinner), 'Loading parameters...')
               : availableSignals.length === 0
-                ? h('div', { className: 'empty-state', style: { minHeight: 80 } }, 'No parameters available for this hierarchy yet.')
+                ? h('div', { className: 'empty-state', style: { minHeight: 80 } },
+                    lastSignalApiErrors.length > 0
+                      ? h(React.Fragment, null,
+                          h('div', { style: { color: 'var(--bad, #eb6b6b)', fontWeight: 600, marginBottom: 6 } },
+                            'Could not load the parameter list from the server.'),
+                          h('div', { style: { fontSize: 12, color: 'var(--text-soft)', lineHeight: 1.5, textAlign: 'left', maxWidth: 420, margin: '0 auto' } },
+                            lastSignalApiErrors.join(' \u00b7 '),
+                            h('div', { style: { marginTop: 10, fontSize: 11, color: 'var(--text-muted)' } },
+                              'Check the browser Network tab for GET /api/analytics/signals. Common causes: API timeout, reverse-proxy limits, a different host than the UI (set localStorage.solar_api_base), or the API build lagging behind the DB (redeploy the backend with the current /signals implementation).',
+                            ),
+                          ),
+                        )
+                      : 'No parameters available for this hierarchy yet.',
+                  )
                 : visibleSignalsForPicker.length === 0
                   ? h('div', { style: { fontSize: 12, color: 'var(--text-muted)' } }, 'Select equipment rows first; parameters are filtered by hierarchy (WMS = weather only, Inverter = power/current, etc.).')
                   : visibleSignalsForPicker.map(sig => h('label', { key: sig, style: { display: 'flex', gap: 8, alignItems: 'center', cursor: 'pointer', fontSize: 13 } },

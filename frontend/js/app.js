@@ -1,7 +1,7 @@
 // frontend/js/app.js
 // Root React application - auth guard, sidebar layout, page router.
 
-const { useState, useEffect, useLayoutEffect, useCallback } = React;
+const { useState, useEffect, useLayoutEffect, useCallback, useRef } = React;
 const h = React.createElement;
 
 const HASH_TO_PAGE = {
@@ -60,17 +60,18 @@ function shiftIsoDate(value, days) {
 
 /** Canonical theme ids — must match server ALLOWED_ORG_THEMES / admin swatches. */
 const SOLAR_THEME_IDS = new Set([
+  'photon',
   'dark_ocean', 'dark_ink', 'dark_forest',
   'light_paper', 'light_air', 'light_sand',
   'vikram',
 ]);
 
 function normalizeSolarThemeId(x) {
-  if (x == null || x === '') return 'dark_ocean';
+  if (x == null || x === '') return 'photon';
   const s = String(x).trim();
   if (s === 'dark') return 'dark_ocean';
   if (s === 'light') return 'light_paper';
-  if (!SOLAR_THEME_IDS.has(s)) return 'dark_ocean';
+  if (!SOLAR_THEME_IDS.has(s)) return 'photon';
   return s;
 }
 
@@ -79,29 +80,19 @@ function applySolarThemeToDocument(tid) {
   const t = normalizeSolarThemeId(tid);
   Array.prototype.slice.call(body.classList).filter((c) => c.indexOf('theme-preset--') === 0)
     .forEach((c) => { body.classList.remove(c); });
-  body.classList.remove('theme-light', 'theme-vikram');
+  body.classList.remove('theme-light', 'theme-vikram', 'theme-photon');
   body.setAttribute('data-solar-theme', t);
   if (t === 'vikram') { body.classList.add('theme-vikram'); return; }
+  /** Lovable “Photon Intelligence” look — light shell, warm sidebar, soft orange active nav. */
+  if (t === 'photon') { body.classList.add('theme-light', 'theme-photon'); return; }
   if (t.indexOf('light_') === 0) body.classList.add('theme-light');
   if (t !== 'dark_ocean') body.classList.add('theme-preset--' + t);
 }
 
-const ThemeIconSun = h('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
-  h('circle', { cx: 12, cy: 12, r: 4 }),
-  h('line', { x1: 12, y1: 1, x2: 12, y2: 3 }), h('line', { x1: 12, y1: 21, x2: 12, y2: 23 }),
-  h('line', { x1: 4.22, y1: 4.22, x2: 5.64, y2: 5.64 }), h('line', { x1: 18.36, y1: 18.36, x2: 19.78, y2: 19.78 }),
-  h('line', { x1: 1, y1: 12, x2: 3, y2: 12 }), h('line', { x1: 21, y1: 12, x2: 23, y2: 12 }),
-  h('line', { x1: 4.22, y1: 19.78, x2: 5.64, y2: 18.36 }), h('line', { x1: 18.36, y1: 5.64, x2: 19.78, y2: 4.22 }),
-);
-
-const ThemeIconMoon = h('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
-  h('path', { d: 'M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z' }),
-);
-
 // ── Topbar ────────────────────────────────────────────────────────────────────
 function Topbar({ page, plants, plantId, onPlantChange, onAddPlant, dateFrom, dateTo, onDateChange, user, theme, onThemeToggle, onThemeSelect, sidebarOpen, onToggleSidebar }) {
   const [showUserMenu, setShowUserMenu] = useState(false);
-  const isLight = theme && (theme.startsWith('light_') || theme === 'light_paper');
+  const isLight = theme && (theme.startsWith('light_') || theme === 'light_paper' || theme === 'photon');
   const PAGE_TITLES = {
     Dashboard: 'Dashboard',
     'Analytics Lab': 'Analytics Lab',
@@ -114,7 +105,7 @@ function Topbar({ page, plants, plantId, onPlantChange, onAddPlant, dateFrom, da
   };
 
   return h('div', { className: 'topbar' },
-    h('div', { className: 'topbar-leading' },
+    h('div', { className: 'topbar-col topbar-col--lead' },
       h('button', {
         type: 'button',
         className: 'hamburger-btn',
@@ -130,7 +121,7 @@ function Topbar({ page, plants, plantId, onPlantChange, onAddPlant, dateFrom, da
       ),
       h('span', { className: 'topbar-title' }, PAGE_TITLES[page] || page),
     ),
-    h('div', { className: 'topbar-controls' },
+    h('div', { className: 'topbar-col topbar-col--center' },
       h('div', { className: 'topbar-group topbar-group-plant' },
         h('div', { className: 'plant-selector' },
           h('span', { className: 'topbar-field-label' }, 'Plant'),
@@ -138,8 +129,10 @@ function Topbar({ page, plants, plantId, onPlantChange, onAddPlant, dateFrom, da
             plants.length === 0 ? h('option', { value: '' }, '- No plants -') : plants.map(p => h('option', { key: p.plant_id, value: p.plant_id }, p.name)),
           ),
         ),
-        h('button', { type: 'button', className: 'btn btn-outline topbar-add-plant', onClick: onAddPlant }, 'Add Plant'),
+        h('button', { type: 'button', className: 'btn btn-outline topbar-add-plant', onClick: onAddPlant, title: 'Add plant' }, 'Add'),
       ),
+    ),
+    h('div', { className: 'topbar-col topbar-col--end' },
       ['Dashboard', 'Analytics Lab', 'Fault Diagnostics', 'Loss Analysis', 'Reports'].includes(page) && h('div', { className: 'topbar-group topbar-group-dates' },
         h('input', { type: 'date', className: 'date-input', value: dateFrom, onChange: e => onDateChange(e.target.value, dateTo) }),
         h('span', { className: 'topbar-date-sep' }, '\u2192'),
@@ -147,17 +140,21 @@ function Topbar({ page, plants, plantId, onPlantChange, onAddPlant, dateFrom, da
         window.DatePresetPicker && h(window.DatePresetPicker, { dateFrom, dateTo, onDateChange }),
       ),
       h('div', { className: 'topbar-group topbar-group-actions' },
-        h('button', { type: 'button', className: 'btn btn-outline theme-toggle-btn', onClick: onThemeToggle, title: 'Toggle light / dark' }, isLight ? ThemeIconMoon : ThemeIconSun),
         h('div', { className: 'user-menu-wrap' },
           h('div', { className: 'user-avatar', onClick: (e) => { e.stopPropagation(); setShowUserMenu(p => !p); } },
             (user?.full_name || user?.email || 'U')[0].toUpperCase(),
           ),
           showUserMenu && h('div', { className: 'user-menu-dropdown user-menu-dropdown--themes' },
+            h('button', {
+              type: 'button',
+              className: 'user-menu-item',
+              onClick: () => { onThemeToggle(); setShowUserMenu(false); },
+            }, isLight ? 'Quick: dark UI' : 'Quick: sun theme'),
             h('div', { className: 'user-menu-title' }, 'Theme'),
             h('div', { className: 'user-menu-theme-grid' },
-              ['dark_ocean', 'dark_ink', 'dark_forest', 'light_paper', 'light_air', 'light_sand'].map((id) => {
+              ['photon', 'dark_ocean', 'dark_ink', 'dark_forest', 'light_paper', 'light_air', 'light_sand'].map((id) => {
                 const labels = {
-                  dark_ocean: 'Dark · Ocean', dark_ink: 'Dark · Ink', dark_forest: 'Dark · Forest',
+                  photon: 'Sun · Photon', dark_ocean: 'Dark · Ocean', dark_ink: 'Dark · Ink', dark_forest: 'Dark · Forest',
                   light_paper: 'Light · Paper', light_air: 'Light · Air', light_sand: 'Light · Sand',
                 };
                 return h('button', {
@@ -369,6 +366,97 @@ function Sidebar({ page, faultSub, onNavigateFaultSub, onPageChange, user, onLog
   );
 }
 
+/** Create plant via API; on success parent refreshes the list and selects the new plant. */
+function AddPlantModal({ open, onClose, onSuccess }) {
+  const [pid, setPid] = useState('');
+  const [pname, setPname] = useState('');
+  const [capacity, setCapacity] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState(null);
+  const Modal = window.Modal;
+
+  useEffect(() => {
+    if (open) {
+      setPid('');
+      setPname('');
+      setCapacity('');
+      setErr(null);
+      setSaving(false);
+    }
+  }, [open]);
+
+  if (!Modal) return null;
+
+  const close = () => { if (!saving) onClose(); };
+
+  const submit = () => {
+    const id = String(pid || '').trim();
+    const name = String(pname || '').trim();
+    if (!id || !name) return;
+    setSaving(true);
+    setErr(null);
+    const body = { plant_id: id, name, technology: 'Solar PV', status: 'Active' };
+    const c = String(capacity || '').trim();
+    if (c !== '' && !Number.isNaN(Number(c))) body.capacity_mwp = Number(c);
+    window.SolarAPI.Plants.create(body)
+      .then((created) => { onSuccess(created); })
+      .catch((e) => { setErr((e && e.message) ? e.message : String(e)); })
+      .finally(() => { setSaving(false); });
+  };
+
+  return h(Modal, {
+    title: 'Add plant',
+    open,
+    onClose: close,
+    footer: h(React.Fragment, null,
+      h('button', { type: 'button', className: 'btn btn-outline', onClick: close, disabled: saving }, 'Cancel'),
+      h('button', {
+        type: 'button',
+        className: 'btn btn-primary',
+        onClick: submit,
+        disabled: saving || !String(pid || '').trim() || !String(pname || '').trim(),
+      }, saving ? 'Creating…' : 'Create'),
+    ),
+  },
+    err && h('div', { style: { color: 'var(--bad)', fontSize: 12, marginBottom: 12, lineHeight: 1.45 } }, err),
+    h('p', { style: { fontSize: 12, color: 'var(--text-soft)', marginBottom: 14, lineHeight: 1.5 } },
+      'Adds a plant record. Configure architecture, equipment, and data uploads from Metadata after creating.'),
+    h('div', { className: 'form-group' },
+      h('label', { className: 'form-label' }, 'Plant ID', h('span', { style: { color: 'var(--bad)', marginLeft: 4 } }, '*')),
+      h('input', {
+        className: 'form-input',
+        value: pid,
+        onChange: (e) => setPid(e.target.value),
+        placeholder: 'e.g. PLANT-02',
+        maxLength: 64,
+        disabled: saving,
+        autoComplete: 'off',
+      }),
+    ),
+    h('div', { className: 'form-group' },
+      h('label', { className: 'form-label' }, 'Display name', h('span', { style: { color: 'var(--bad)', marginLeft: 4 } }, '*')),
+      h('input', {
+        className: 'form-input',
+        value: pname,
+        onChange: (e) => setPname(e.target.value),
+        placeholder: 'e.g. NTPC NOKHRA 300 mw',
+        maxLength: 200,
+        disabled: saving,
+      }),
+    ),
+    h('div', { className: 'form-group' },
+      h('label', { className: 'form-label' }, 'Capacity (MWp)'),
+      h('input', {
+        className: 'form-input',
+        value: capacity,
+        onChange: (e) => setCapacity(e.target.value),
+        placeholder: 'optional',
+        disabled: saving,
+      }),
+    ),
+  );
+}
+
 function App() {
   const [user, setUser] = useState(null);
   const [authed, setAuthed] = useState(false);
@@ -377,17 +465,18 @@ function App() {
   const [faultSub, setFaultSub] = useState(() => parseLocationHash().faultSub);
   const [plants, setPlants] = useState([]);
   const [plantId, setPlantId] = useState(readStoredPlantId());
+  const [addPlantOpen, setAddPlantOpen] = useState(false);
   const SOLAR_CHUNK_PAGES = new Set(['Analytics Lab', 'Fault Diagnostics', 'Loss Analysis', 'Reports', 'Guidebook', 'Metadata', 'Admin']);
   const [routeReady, setRouteReady] = useState(() => !SOLAR_CHUNK_PAGES.has(parseLocationHash().page));
   const [routeLoadErr, setRouteLoadErr] = useState(null);
-  const [orgDefaultTheme, setOrgDefaultTheme] = useState('dark_ocean');
+  const [orgDefaultTheme, setOrgDefaultTheme] = useState('photon');
 
   const [theme, setThemeState] = useState(function () {
     try {
       var s = localStorage.getItem('solar_theme');
       if (s != null && s !== '') return normalizeSolarThemeId(s);
     } catch (e) {}
-    return 'dark_ocean';
+    return 'photon';
   });
   const setTheme = useCallback(function (tid) {
     var n = normalizeSolarThemeId(tid);
@@ -406,7 +495,7 @@ function App() {
     window.__solarApplyThemeForPreview = function (tid) { applySolarThemeToDocument(tid); };
     window.__solarGetStoredTheme = function () {
       try { return normalizeSolarThemeId(localStorage.getItem('solar_theme')); }
-      catch (e) { return 'dark_ocean'; }
+      catch (e) { return 'photon'; }
     };
     return function () {
       try {
@@ -421,13 +510,41 @@ function App() {
   const handleNavigateFaultSub = useCallback((s) => { window.location.hash = `fault-diagnostics/${s}`; }, []);
   const handleLogout = () => { window.SolarAPI.clearToken(); setUser(null); setAuthed(false); };
 
+  const handlePlantCreated = useCallback((created) => {
+    if (!created || !created.plant_id) {
+      setAddPlantOpen(false);
+      return;
+    }
+    const newId = String(created.plant_id);
+    setAddPlantOpen(false);
+    window.SolarAPI.Plants.list()
+      .then((ps) => { if (Array.isArray(ps)) setPlants(ps); })
+      .catch((e) => {
+        console.warn('Plants.list after create failed, merging new plant in UI:', e);
+        setPlants((prev) => {
+          if (!Array.isArray(prev)) return [created];
+          if (prev.some((p) => p && p.plant_id === newId)) return prev;
+          return [...prev, created].sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+        });
+      });
+    setPlantId(newId);
+    try { localStorage.setItem(PLANT_STORAGE_KEY, newId); } catch (e) { /* noop */ }
+  }, []);
+
+  const handleAddPlant = useCallback(() => { setAddPlantOpen(true); }, []);
+
+  const prevTopLevelPageRef = useRef(parseLocationHash().page);
   useEffect(() => {
     const sync = () => {
       const p = parseLocationHash();
-      // Cancel any in-flight requests from the page we're leaving so they
-      // don't land into state setters on an unmounted / replaced tree.
-      if (typeof window.__abortRouteRequests === 'function') {
-        try { window.__abortRouteRequests(); } catch (e) { /* noop */ }
+      // Abort in-flight fetches only when the main module (top bar page) changes.
+      // Fault Diagnostics sub-views (overview vs disconnected strings) only change
+      // faultSub — aborting there cancelled unified feed with "route change".
+      if (p.page !== prevTopLevelPageRef.current) {
+        prevTopLevelPageRef.current = p.page;
+        if (typeof window.__abortRouteRequests === 'function') {
+          try { window.__abortRouteRequests(); } catch (e) { /* noop */ }
+        }
       }
       setPageState(p.page);
       setFaultSub(p.faultSub);
@@ -510,7 +627,8 @@ function App() {
   return h('div', { className: `app-layout ${sidebarOpen ? '' : 'mini-sidebar'}` },
     h(Sidebar, { page, faultSub, onNavigateFaultSub: handleNavigateFaultSub, onPageChange: handlePageChange, user, onLogout: handleLogout, sidebarOpen }),
     h('div', { className: 'main-area' },
-      h(Topbar, { page, plants, plantId, onPlantChange: (id) => { setPlantId(id); localStorage.setItem(PLANT_STORAGE_KEY, id); }, onAddPlant: () => { }, dateFrom, dateTo, onDateChange: (f, t) => { setDateFrom(f); setDateTo(t); }, user, theme, onThemeToggle: () => setTheme((theme && (theme.startsWith('light_') || theme === 'light_paper')) ? 'dark_ocean' : 'light_paper'), onThemeSelect: setTheme, sidebarOpen, onToggleSidebar: handleToggleSidebar }),
+      h(Topbar, { page, plants, plantId, onPlantChange: (id) => { setPlantId(id); localStorage.setItem(PLANT_STORAGE_KEY, id); }, onAddPlant: handleAddPlant, dateFrom, dateTo, onDateChange: (f, t) => { setDateFrom(f); setDateTo(t); }, user, theme, onThemeToggle: () => setTheme((theme && (theme.startsWith('light_') || theme === 'light_paper' || theme === 'photon')) ? 'dark_ocean' : 'photon'), onThemeSelect: setTheme, sidebarOpen, onToggleSidebar: handleToggleSidebar }),
+      h(AddPlantModal, { open: addPlantOpen, onClose: () => setAddPlantOpen(false), onSuccess: handlePlantCreated }),
       h('div', { className: 'page-content', key: page },
         !routeReady && h(RouteLoadingScreen, { page }),
         routeLoadErr && h('div', { className: 'card', style: { padding: 24, borderColor: 'rgba(235,107,107,0.35)' } },

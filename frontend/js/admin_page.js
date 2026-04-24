@@ -23,6 +23,7 @@ window.AdminPage = (props = {}) => {
   const [editForm, setEditForm] = useState({ email:'', full_name:'', password:'', is_active:true, is_admin: false, allowed_plants:'' });
 
   const THEME_SWATCHES = [
+    { id: 'photon', label: 'Sun · Photon' },
     { id: 'dark_ocean', label: 'Dark · Ocean' },
     { id: 'dark_ink', label: 'Dark · Ink' },
     { id: 'dark_forest', label: 'Dark · Forest' },
@@ -31,7 +32,7 @@ window.AdminPage = (props = {}) => {
     { id: 'light_sand', label: 'Light · Sand' },
     { id: 'vikram', label: 'Vikram Solar' },
   ];
-  const [appearanceDraft, setAppearanceDraft] = useState(() => orgDefaultTheme || 'dark_ocean');
+  const [appearanceDraft, setAppearanceDraft] = useState(() => orgDefaultTheme || 'photon');
   const [appearanceSaving, setAppearanceSaving] = useState(false);
 
   const [precomputeQ, setPrecomputeQ] = useState(null);
@@ -46,7 +47,7 @@ window.AdminPage = (props = {}) => {
   const [precomputeEnqueuing, setPrecomputeEnqueuing] = useState(false);
 
   useEffect(() => {
-    setAppearanceDraft(orgDefaultTheme || 'dark_ocean');
+    setAppearanceDraft(orgDefaultTheme || 'photon');
   }, [orgDefaultTheme]);
 
   useEffect(() => {

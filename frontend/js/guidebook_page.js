@@ -104,7 +104,7 @@
           'Analytics Lab for arbitrary signal plotting at inverter/SCB/string/WMS levels.',
         ]),
         subTitle('How to read this Guidebook'),
-        p('Use the table of contents on the left to jump to any module. Each module page includes (1) what it does, (2) the exact formulas it uses, (3) the data it expects, and (4) common questions. Formulas are written in the same notation used by the backend.'),
+        p('Use the table of contents on the left to jump to any module. Each module page includes (1) what it does, (2) the exact formulas it uses, (3) the data it expects, and (4) common questions. Formulas are written in the same notation used by the backend. For where each screen reads its numbers from, open Data sources & API map.'),
       ],
     },
 
@@ -481,6 +481,49 @@
           'Configure ticket recipient email \u2014 where user-raised support tickets are sent.',
           'Download plant reports (PDF) covering Dashboard KPIs, graphs, and loss analysis.',
         ]),
+      ],
+    },
+
+    {
+      id: 'data-lineage',
+      title: 'Data sources & API map',
+      render: () => [
+        p('Use this table to trace any on-screen value to its HTTP endpoint and, where it helps performance tuning, the underlying data stores. The UI uses window.location.origin for API calls (same host as the app) unless you set localStorage.solar_api_base for development.'),
+        subTitle('Request lifecycle'),
+        ul([
+          'Top bar plant and date range are React state; every module receives plant_id, date_from, date_to as query parameters.',
+          'Authentication: Bearer token from /auth/login is sent on all /api/* calls (see frontend/js/api.js).',
+          'Slow screens: use browser DevTools \u2192 Network, filter by plant_id, and compare timings between environments.',
+        ]),
+        subTitle('Dashboard'),
+        ul([
+          'GET /api/dashboard/bundle (and related) \u2014 assembled KPIs, energy, weather, WMS, inverter table; backed by raw time-series, plant_equipment, architecture, and dashboard cache helpers in backend/routers/dashboard.py.',
+        ]),
+        subTitle('Analytics Lab'),
+        ul([
+          'GET /api/analytics/equipment and GET /api/analytics/signals?level=&plant_id= \u2014 equipment ids and distinct signals per hierarchy; reads raw_data_generic, dc_hierarchy_derived, plant_equipment (router: backend/routers/analytics.py).',
+          'GET /api/analytics/timeseries \u2014 plotted series for selected equipment and signals; responses are cached server-side for a few minutes.',
+          'If parameters stay empty in production but work locally, check Network for /api/analytics/signals (timeouts 502/504, 401) and confirm the production API is the same commit as the environment where signals work (older routers could time out on large plants).',
+        ]),
+        subTitle('Fault Diagnostics'),
+        ul([
+          'GET /api/faults/unified-feed (with client-side merge fallbacks) for overview tables and tiles; category-specific GET /api/faults/* (ds-*, pl-*, is-*, comm-*, etc.) in backend/routers/faults.py.',
+          'Precomputed snapshots may be read when present; otherwise engines compute from raw data (see backend/engine/).',
+        ]),
+        subTitle('Loss Analysis'),
+        ul([
+          'GET /api/loss-analysis/bridge and options (or /api/dashboard/loss-analysis/* aliases) \u2014 per-category energy bridge; sources listed in backend/routers and loss helpers.',
+        ]),
+        subTitle('Metadata'),
+        ul([
+          'Architecture, equipment specs, uploads: /api/metadata/* and related routers; persistence in PostgreSQL tables plant_architecture, plant_equipment, raw_data_generic, etc.',
+        ]),
+        subTitle('Reports, appearance, admin'),
+        ul([
+          'Reports: /api/reports/* (generated artifacts).',
+          'Site theme: /api/site/appearance; Admin: /api/admin/* — user and plant management.',
+        ]),
+        p('For algorithm-level detail, the FAQ entry \u201cWhere are the raw algorithm sources?\u201d still points at backend/engine/*.py and backend/routers/*.py as the code of record.'),
       ],
     },
 

@@ -20,6 +20,8 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 os.environ.setdefault("SOLAR_SERVERLESS", "1")
+os.environ.setdefault("SOLAR_SNAPSHOT_READ_ONLY", "1")
+os.environ.setdefault("SOLAR_SNAPSHOT_ALLOW_STALE", "1")
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 # Match app.py: expose a top-level FastAPI object before any conditional import

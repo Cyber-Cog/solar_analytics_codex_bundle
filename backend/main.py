@@ -54,7 +54,7 @@ from db_perf import ensure_performance_objects, ensure_performance_objects_bg
 from models import (
     User, Plant, RawDataGeneric, DCHierarchyDerived,
     PlantArchitecture, EquipmentSpec, SupportTicket, RawDataStats, PlantEquipment,
-    DsSummarySnapshot, UnifiedFaultSnapshot, LossAnalysisSnapshot, PlantComputeStatus,
+    DsSummarySnapshot, DsStatusSnapshot, UnifiedFaultSnapshot, LossAnalysisSnapshot, UnifiedFeedCategoryTotal, PlantComputeStatus,
     PrecomputeJob,
 )
 
@@ -273,6 +273,15 @@ def _background_warmup():
 
 if not IS_SERVERLESS:
     threading.Thread(target=_background_warmup, daemon=True, name="cache-warmup").start()
+
+# ── Analytics / Timescale feature flags (read at boot for operator visibility) ─
+if os.environ.get("SOLAR_ANALYTICS_USE_TIMESCALE_CAGG", "").strip().lower() in ("1", "true", "yes"):
+    print(
+        "[solar-config] SOLAR_ANALYTICS_USE_TIMESCALE_CAGG=1 — "
+        "/api/analytics/timeseries will use solar_raw_data_1m_cagg when present"
+    )
+if os.environ.get("SOLAR_ANALYTICS_TS_CACHE_SEC", "").strip():
+    print(f"[solar-config] SOLAR_ANALYTICS_TS_CACHE_SEC={os.environ.get('SOLAR_ANALYTICS_TS_CACHE_SEC')}")
 
 # ── FastAPI App ───────────────────────────────────────────────────────────────
 app = FastAPI(

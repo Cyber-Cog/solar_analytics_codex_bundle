@@ -9,6 +9,7 @@ Provides:
   - GET /api/admin/perf/slow-queries   — recent slow queries
   - GET /api/admin/perf/endpoint-stats — per-endpoint timing
   - GET /api/admin/perf/db-health      — DB connection + table stats
+  - GET /api/admin/perf/timescale-status — Timescale extension + CAGG readiness
   - POST /api/admin/perf/run-precompute — trigger fault/loss precompute
   - GET /api/admin/perf/precompute-status — status of precompute jobs
 """
@@ -23,7 +24,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from database import get_db
-from models import User, FaultCache, Plant
+from models import User, FaultCache, Plant, RawDataStats
 from auth.routes import get_current_user
 
 log = logging.getLogger(__name__)
@@ -69,141 +70,251 @@ def record_slow_query(sql_preview: str, duration_ms: float, params_preview: str 
             _slow_queries[:] = _slow_queries[-500:]
 
 
-# ── Precompute state ─────────────────────────────────────────────────────────
+# ── Full fault pipeline (admin UI) — module snapshots + fault runtime tab engines ──
+_MAX_EVENT_LOG = 200
 _precompute_lock = threading.Lock()
-_precompute_status = {
+_precompute_status: dict = {
     "running": False,
+    "mode": "idle",  # idle | full_fault_pipeline
     "last_run": None,
     "last_duration_s": None,
     "last_error": None,
     "plants_done": 0,
     "plants_total": 0,
     "current_plant": None,
+    "step": None,
+    "percent": 0.0,
+    "eta_seconds": None,
+    "elapsed_seconds": None,
+    "started_at": None,
+    "event_log": [],
 }
 
-def _run_precompute_background():
-    """Background thread: compute and cache fault/loss results for every plant."""
+
+def _precompute_log(msg: str) -> None:
+    global _precompute_status
+    entry = {
+        "t": datetime.now(timezone.utc).isoformat(),
+        "message": str(msg)[:2000],
+    }
+    with _precompute_lock:
+        ev: list = _precompute_status.setdefault("event_log", [])
+        ev.append(entry)
+        if len(ev) > _MAX_EVENT_LOG:
+            del ev[: len(ev) - _MAX_EVENT_LOG]
+
+
+def _set_precompute_state(**kwargs) -> None:
+    with _precompute_lock:
+        for k, v in kwargs.items():
+            _precompute_status[k] = v
+
+
+def _update_eta_plant_wise(plant_index_0based: int, plants_total: int, t0_wall: float) -> None:
+    """ETA = avg seconds per completed plant * remaining plants."""
+    if plant_index_0based < 0 or plants_total <= 0:
+        return
+    elapsed = max(0.001, time.time() - t0_wall)
+    done = plant_index_0based + 1
+    if done <= 0:
+        return
+    sp = elapsed / done
+    remain = max(0, plants_total - done)
+    eta = int(sp * remain)
+    pct = min(100.0, (done / plants_total) * 100.0)
+    _set_precompute_state(eta_seconds=eta, percent=round(pct, 1), elapsed_seconds=round(elapsed, 1))
+
+
+def _run_full_fault_pipeline_background():
+    """
+    Background: for each plant, run
+      1) module_precompute.compute_snapshots_for_range (DS summary, unified feed JSON, loss bridge, category total rows);
+      2) parallel warm of fault tab engines: PL, IS, GB, comm, CD (same as Fault Diagnostics sub-tabs).
+
+    Note: this does not re-run the disconnected-string *detection* (run_ds_detection on raw SCB
+    time series); that runs on data ingest. This warms *aggregates and tab analyses* for the UI.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from database import SessionLocal
+
     global _precompute_status
 
     with _precompute_lock:
-        if _precompute_status["running"]:
+        if _precompute_status.get("running"):
             return
         _precompute_status["running"] = True
         _precompute_status["last_error"] = None
         _precompute_status["plants_done"] = 0
+        _precompute_status["plants_total"] = 0
         _precompute_status["current_plant"] = None
+        _precompute_status["step"] = "starting"
+        _precompute_status["percent"] = 0.0
+        _precompute_status["eta_seconds"] = None
+        _precompute_status["elapsed_seconds"] = None
+        _precompute_status["event_log"] = []
+        _precompute_status["mode"] = "full_fault_pipeline"
+        _precompute_status["started_at"] = datetime.now(timezone.utc).isoformat()
 
-    t0 = time.time()
+    t0_wall = time.time()
+    _precompute_log("Full fault pipeline started (module snapshots + fault tab engines per plant)")
+
     try:
-        s = SessionLocal()
+        s0 = SessionLocal()
         try:
-            plants = s.query(Plant).all()
-            plant_ids = [p.plant_id for p in plants]
+            plants = s0.query(Plant).all()
+            plant_ids = [p.plant_id for p in plants if p.plant_id]
+            u = s0.query(User).first()
         finally:
-            s.close()
+            s0.close()
 
-        _precompute_status["plants_total"] = len(plant_ids)
+        if u is None:
+            raise RuntimeError("No user row in database; cannot run module precompute")
 
-        today = datetime.now().date()
-        date_from = str(today - timedelta(days=7))
-        date_to = str(today)
+        n = len(plant_ids)
+        _set_precompute_state(plants_total=n, plants_done=0)
+        _precompute_log("Plants to process: %d" % n)
+        if n == 0:
+            _set_precompute_state(
+                step="complete",
+                percent=100.0,
+                eta_seconds=0,
+                running=False,
+            )
+            _precompute_status["last_duration_s"] = 0.0
+            _precompute_status["elapsed_seconds"] = 0.0
+            _precompute_status["last_run"] = datetime.now(timezone.utc).isoformat()
+            _precompute_log("No plants in database — nothing to do")
 
         for i, pid in enumerate(plant_ids):
-            _precompute_status["current_plant"] = pid
-            _precompute_status["plants_done"] = i
-            try:
-                _precompute_one_plant(pid, date_from, date_to)
-            except Exception as exc:
-                log.warning("Precompute failed for plant %s: %s", pid, exc)
-
-        _precompute_status["plants_done"] = len(plant_ids)
-        _precompute_status["current_plant"] = None
-        _precompute_status["last_duration_s"] = round(time.time() - t0, 1)
-        _precompute_status["last_run"] = datetime.now(timezone.utc).isoformat()
-    except Exception as exc:
-        _precompute_status["last_error"] = str(exc)
-        log.error("Precompute background error: %s", exc)
-    finally:
-        _precompute_status["running"] = False
-
-
-def _precompute_one_plant(plant_id: str, date_from: str, date_to: str):
-    """
-    Pre-compute dashboard bundle + fault diagnostics for a single plant.
-    Results go into the existing cache layers so subsequent user requests
-    hit the warm cache instead of computing from scratch.
-    """
-    from database import SessionLocal
-
-    # 1. Warm dashboard bundle cache
-    try:
-        s = SessionLocal()
-        try:
-            from db_perf import choose_data_table
-            from dashboard_cache import get as cache_get
-            # Check if already cached
-            cached = cache_get("bundle_v8", plant_id, date_from, date_to)
-            if cached is None:
-                from routers.dashboard import dashboard_bundle
-                # Import helpers to manually invoke the bundle logic
-                from routers.dashboard import _default_range, _inverter_dc_maps, _plant_dc_kwp_from_inverters
-                _from, _to = _default_range(date_from, date_to)
-                # Trigger by importing the internal function path
-                # We call the endpoint function directly — it writes to cache
-                from unittest.mock import MagicMock
-                mock_user = MagicMock()
-                mock_user.is_admin = True
-                mock_user.allowed_plants = "*"
-                # Actually, let's just call the SQL-level functions directly
-                # to warm the cache without needing full DI
-                from routers.dashboard import (
-                    sql_plant_ac_totals, _wms_tilt_insolation_kwh_m2,
-                    _wms_kpis_payload, sql_plant_ac_daily_energy,
-                    _inverter_performance_table, _sql_power_vs_gti,
-                    _power_vs_gti_row_limit
-                )
-                from sqlalchemy import text as sa_text
-                from models import Plant as PlantModel
-
-                table = choose_data_table(s, plant_id, _from, _to)
-                plant = s.query(PlantModel).filter(PlantModel.plant_id == plant_id).first()
-                cap_kw = (plant.capacity_mwp * 1000) if (plant and plant.capacity_mwp) else None
-                f_ts = f"{_from} 00:00:00"
-                t_ts = f"{_to} 23:59:59"
-
-                # Run queries (these populate internal caches)
-                try:
-                    _wms_tilt_insolation_kwh_m2(s, table, plant_id, f_ts, t_ts)
-                except Exception:
-                    pass
-                try:
-                    _inverter_performance_table(s, table, plant_id, f_ts, t_ts, _from, _to)
-                except Exception:
-                    pass
-        finally:
-            s.close()
-    except Exception as exc:
-        log.debug("Precompute dashboard cache for %s: %s", plant_id, exc)
-
-    # 2. Warm fault diagnostics cache
-    try:
-        s = SessionLocal()
-        try:
-            from routers.faults import (
-                _pl_page_with_cache, _is_tab_with_cache,
-                _gb_tab_with_cache, _comm_tab_with_cache,
-                _cd_tab_with_cache,
+            _set_precompute_state(
+                current_plant=pid,
+                plants_done=i,
+                step="module_snapshots",
             )
-            _pl_page_with_cache(s, plant_id, date_from, date_to)
-            _is_tab_with_cache(s, plant_id, date_from, date_to)
-            _gb_tab_with_cache(s, plant_id, date_from, date_to)
-            _comm_tab_with_cache(s, plant_id, date_from, date_to)
-            _cd_tab_with_cache(s, plant_id, date_from, date_to)
-        finally:
-            s.close()
+            frac = (i + 0.1) / max(n, 1)
+            _set_precompute_state(percent=round(100.0 * frac, 1))
+            _precompute_log(
+                "[%s] Step 1/2: module snapshots (ds_summary, unified_feed, loss_bridge, category_totals)…" % pid
+            )
+
+            df, dt = None, None
+            s1 = SessionLocal()
+            try:
+                from module_precompute import (
+                    compute_snapshots_for_range,
+                    resolve_recompute_day_range,
+                    validate_or_refresh_raw_data_stats,
+                )
+
+                st = validate_or_refresh_raw_data_stats(s1, pid)
+                mnts = st.min_ts if st else None
+                mxxt = st.max_ts if st else None
+                df, dt = resolve_recompute_day_range(s1, pid, mnts, mxxt)
+                compute_snapshots_for_range(s1, pid, df, dt, u)
+            except Exception as exc:
+                log.warning("module precompute failed for %s: %s", pid, exc)
+                _precompute_log("[%s] ERROR module snapshots: %s" % (pid, exc))
+            finally:
+                s1.close()
+
+            _set_precompute_state(
+                step="fault_tab_engines", percent=round(100.0 * (i + 0.55) / max(n, 1), 1)
+            )
+            _precompute_log("[%s] Step 2/2: fault tab engines (PL, IS, GB, comm, CD in parallel)…" % pid)
+
+            try:
+                from routers.faults import (
+                    _pl_page_with_cache,
+                    _is_tab_with_cache,
+                    _gb_tab_with_cache,
+                    _comm_tab_with_cache,
+                    _cd_tab_with_cache,
+                )
+
+                def _run_pl():
+                    s = SessionLocal()
+                    try:
+                        return _pl_page_with_cache(s, pid, df, dt)
+                    finally:
+                        s.close()
+
+                def _run_is():
+                    s = SessionLocal()
+                    try:
+                        return _is_tab_with_cache(s, pid, df, dt)
+                    finally:
+                        s.close()
+
+                def _run_gb():
+                    s = SessionLocal()
+                    try:
+                        return _gb_tab_with_cache(s, pid, df, dt)
+                    finally:
+                        s.close()
+
+                def _run_comm():
+                    s = SessionLocal()
+                    try:
+                        return _comm_tab_with_cache(s, pid, df, dt)
+                    finally:
+                        s.close()
+
+                def _run_cd():
+                    s = SessionLocal()
+                    try:
+                        return _cd_tab_with_cache(s, pid, df, dt)
+                    finally:
+                        s.close()
+
+                with ThreadPoolExecutor(max_workers=5) as pool:
+                    futs = {
+                        pool.submit(_run_pl): "power_limitation",
+                        pool.submit(_run_is): "inverter_shutdown",
+                        pool.submit(_run_gb): "grid_breakdown",
+                        pool.submit(_run_comm): "communication_issue",
+                        pool.submit(_run_cd): "clipping_derating",
+                    }
+                    for fut in as_completed(futs):
+                        name = futs[fut]
+                        try:
+                            fut.result()
+                            _precompute_log("[%s]   OK %s" % (pid, name))
+                        except Exception as ex:
+                            _precompute_log("[%s]   FAIL %s: %s" % (pid, name, ex))
+            except Exception as exc:
+                log.warning("fault tab warm failed for %s: %s", pid, exc)
+                _precompute_log("[%s] ERROR fault tabs: %s" % (pid, exc))
+
+            _set_precompute_state(
+                plants_done=i + 1,
+                step="plant_done",
+                percent=round(100.0 * (i + 1) / max(n, 1), 1),
+            )
+            _update_eta_plant_wise(i, n, t0_wall)
+            _precompute_log("[%s] finished" % pid)
+
+        if n > 0:
+            _set_precompute_state(
+                current_plant=None,
+                step="complete",
+                percent=100.0,
+                eta_seconds=0,
+                running=False,
+            )
+            _precompute_status["last_duration_s"] = round(time.time() - t0_wall, 1)
+            _precompute_status["elapsed_seconds"] = _precompute_status["last_duration_s"]
+            _precompute_status["last_run"] = datetime.now(timezone.utc).isoformat()
+            _precompute_log("All plants complete in %ss" % _precompute_status["last_duration_s"])
     except Exception as exc:
-        log.debug("Precompute faults for %s: %s", plant_id, exc)
+        _set_precompute_state(last_error=str(exc), running=False, step="error", percent=0.0)
+        _precompute_log("FATAL: %s" % exc)
+        log.error("Full fault pipeline error: %s", exc, exc_info=True)
+    finally:
+        with _precompute_lock:
+            if _precompute_status.get("running"):
+                _precompute_status["running"] = False
+            err = _precompute_status.get("last_error")
+            _precompute_status["mode"] = "error" if err else "idle"
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -357,15 +468,35 @@ def perf_db_health(
     return result
 
 
+@router.get("/timescale-status")
+def perf_timescale_status(
+    db: Session = Depends(get_db),
+    admin: User = Depends(_check_admin),
+):
+    """TimescaleDB extension, continuous aggregate presence, and timestamp_ts backfill status."""
+    from routers import analytics_timescale
+
+    return analytics_timescale.timescale_status_payload(db)
+
+
 @router.post("/run-precompute")
 def trigger_precompute(admin: User = Depends(_check_admin)):
-    """Trigger background precompute of fault/loss results for all plants."""
-    if _precompute_status["running"]:
-        return {"ok": False, "message": "Precompute is already running", "status": dict(_precompute_status)}
+    """
+    Trigger the full fault & analytics cache pipeline for all plants (background thread):
+    module snapshots (DS summary, unified feed, loss bridge, category KPI rows) plus
+    fault tab engines (power limitation, inverter shutdown, grid breakdown, communication, clipping/derating).
+    """
+    with _precompute_lock:
+        if _precompute_status.get("running"):
+            return {"ok": False, "message": "Precompute is already running", "status": dict(_precompute_status)}
 
-    thread = threading.Thread(target=_run_precompute_background, daemon=True)
+    thread = threading.Thread(target=_run_full_fault_pipeline_background, daemon=True)
     thread.start()
-    return {"ok": True, "message": "Precompute started in background", "status": dict(_precompute_status)}
+    return {
+        "ok": True,
+        "message": "Full fault pipeline started in background. Poll GET /api/admin/perf/precompute-status for progress.",
+        "status": dict(_precompute_status),
+    }
 
 
 @router.get("/precompute-status")

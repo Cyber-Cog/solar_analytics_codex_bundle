@@ -20,7 +20,7 @@ from models import (
     User, Plant, RawDataGeneric, DCHierarchyDerived, PlantArchitecture,
     EquipmentSpec, SupportTicket, FaultDiagnostics, FaultEpisode,
     FaultEpisodeDay, PlantEquipment, RawDataStats, ScbFaultReview,
-    FaultRuntimeSnapshot, FaultCache, PrecomputeJob,
+    FaultRuntimeSnapshot, FaultCache, PrecomputeJob, UnifiedFeedCategoryTotal,
 )
 from schemas import UserCreate, UserUpdate, UserResponse, MessageResponse
 from auth.routes import get_current_user
@@ -264,6 +264,7 @@ def get_precompute_queue(
         "pending": pending,
         "running": running,
         "worker_hint": "From backend/: python -m jobs.precompute_runner --once --max-jobs 20  (re-run or schedule until pending=0)",
+        "alerts_hint": "Alert if pending grows unbounded or jobs stay running > SOLAR_PRECOMPUTE_STALE_LOCK_MINUTES; see backend/docs/PRECOMPUTE_OPERATIONS.md",
         "recent_jobs": [
             {
                 "id": j.id,
@@ -277,6 +278,45 @@ def get_precompute_queue(
                 "updated_at": j.updated_at.isoformat() if j.updated_at else None,
             }
             for j in recent
+        ],
+    }
+
+
+@router.get("/precompute/unified-category-totals")
+def get_unified_category_totals(
+    plant_id: str = Query(..., description="Plant id"),
+    date_from: str = Query(..., description="YYYY-MM-DD (must match precompute key)"),
+    date_to: str = Query(..., description="YYYY-MM-DD"),
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_admin),
+):
+    """
+    Narrow SQL-backed KPI rows written alongside `unified_fault_snapshot` JSON during precompute
+    (loss_mwh, fault_count per category_id). For BI/reporting without parsing payload_json.
+    """
+    d0, d1 = (date_from or "")[:10], (date_to or "")[:10]
+    rows = (
+        db.query(UnifiedFeedCategoryTotal)
+        .filter(
+            UnifiedFeedCategoryTotal.plant_id == plant_id,
+            UnifiedFeedCategoryTotal.date_from == d0,
+            UnifiedFeedCategoryTotal.date_to == d1,
+        )
+        .order_by(UnifiedFeedCategoryTotal.category_id)
+        .all()
+    )
+    return {
+        "plant_id": plant_id,
+        "date_from": d0,
+        "date_to": d1,
+        "rows": [
+            {
+                "category_id": r.category_id,
+                "loss_mwh": r.loss_mwh,
+                "fault_count": r.fault_count,
+                "computed_at": r.computed_at.isoformat() if r.computed_at else None,
+            }
+            for r in rows
         ],
     }
 

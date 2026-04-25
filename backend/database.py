@@ -55,12 +55,13 @@ def _engine_kwargs(pool_size: int, max_overflow: int) -> dict:
         # Use a tiny QueuePool instead of NullPool.  Warm Vercel invocations
         # reuse the existing TCP+SSL connection (~0 ms) instead of opening a
         # fresh one every call (~300-800 ms to EC2). pool_size=1 means at most
-        # 1 idle connection is kept; max_overflow=2 allows brief bursts.
+        # 1 idle connection is kept; max_overflow allows brief bursts (tune if
+        # parallel bundle workers wait on the pool — watch Postgres max_connections).
         kwargs["poolclass"] = QueuePool
-        kwargs["pool_size"] = 1
-        kwargs["max_overflow"] = 2
+        kwargs["pool_size"] = int(os.environ.get("DB_SERVERLESS_POOL_SIZE", "1"))
+        kwargs["max_overflow"] = int(os.environ.get("DB_SERVERLESS_MAX_OVERFLOW", "2"))
         kwargs["pool_recycle"] = 270  # recycle before Vercel's ~5 min freeze
-        kwargs["pool_timeout"] = 10
+        kwargs["pool_timeout"] = int(os.environ.get("DB_SERVERLESS_POOL_TIMEOUT", "10"))
     else:
         kwargs["pool_size"] = pool_size
         kwargs["max_overflow"] = max_overflow

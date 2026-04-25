@@ -6,16 +6,26 @@ per-category fault losses (same list as unified feed), unknown gap vs metered ac
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from auth.routes import get_current_user
 from database import get_db, SessionLocal
-from module_snapshots import get_loss_analysis_snapshot, save_loss_analysis_snapshot
+from module_snapshots import (
+    SNAPSHOT_READ_ONLY_HTTP_DETAIL,
+    SNAPSHOT_STALE_HTTP_DETAIL,
+    attach_snapshot_stale_meta,
+    get_loss_analysis_snapshot,
+    load_loss_analysis_snapshot_any,
+    save_loss_analysis_snapshot,
+    snapshot_allow_stale,
+    snapshot_read_only_enabled,
+)
 from snap_perf import record_compute_ms, record_snapshot
 from db_perf import choose_data_table
 from models import EquipmentSpec, PlantArchitecture, PlantEquipment, User
@@ -25,6 +35,7 @@ from ac_power_energy_sql import sql_inverter_performance_with_energy
 
 # Shared handlers mounted at two URL prefixes: some deployments / proxies only expose `/api/dashboard/*`.
 _loss_routes = APIRouter(tags=["Loss Analysis"])
+_log = logging.getLogger(__name__)
 
 DEFAULT_TEMP_COEFF = 0.004  # ~0.4% energy per °C above 25 when no module gamma
 
@@ -343,27 +354,41 @@ def compute_plant_expected_actual_mwh_for_range(
     Plant-level expected (DC kWp × tilt insolation / 1000) and metered actual (sum inverter kWh / 1000).
     Same basis as Loss Analysis `primary` for scope=plant, but skips unified-feed categories and
     per-inverter table rows — suitable for dashboard KPIs and caching.
+
+    On any failure (DB timeout, bad data), returns a safe JSON-serializable dict with `compute_error`
+    so the API can respond 200 and the UI can show a message instead of 500s.
     """
-    _from, _to = date_from, date_to
-    f_ts, t_ts = f"{_from} 00:00:00", f"{_to} 23:59:59"
-    table = choose_data_table(db, plant_id, _from, _to)
-    insolation = _insolation_kwh_m2(db, table, plant_id, f_ts, t_ts)
-    plant_dc, inv_dc_map = _plant_dc_kwp(db, plant_id)
-    actual_by_inv = _inverter_actual_kwh(db, table, plant_id, f_ts, t_ts)
-    for inv_id, _ek in actual_by_inv.items():
-        k = str(inv_id).strip() if inv_id is not None else ""
-        if k and k not in inv_dc_map:
-            inv_dc_map[k] = 0.0
-    plant_dc = sum(inv_dc_map.values())
-    plant_actual_kwh = sum(actual_by_inv.values())
-    expected_mwh = (plant_dc * insolation) / 1000.0 if plant_dc > 0 and insolation > 0 else 0.0
-    actual_mwh = plant_actual_kwh / 1000.0
-    return {
-        "expected_mwh": round(expected_mwh, 4),
-        "actual_mwh": round(actual_mwh, 4),
-        "insolation_kwh_m2": round(insolation, 4),
-        "plant_dc_kwp": round(plant_dc, 4),
-    }
+    try:
+        _from, _to = date_from, date_to
+        f_ts, t_ts = f"{_from} 00:00:00", f"{_to} 23:59:59"
+        table = choose_data_table(db, plant_id, _from, _to)
+        insolation = _insolation_kwh_m2(db, table, plant_id, f_ts, t_ts)
+        plant_dc, inv_dc_map = _plant_dc_kwp(db, plant_id)
+        actual_by_inv = _inverter_actual_kwh(db, table, plant_id, f_ts, t_ts)
+        for inv_id, _ek in actual_by_inv.items():
+            k = str(inv_id).strip() if inv_id is not None else ""
+            if k and k not in inv_dc_map:
+                inv_dc_map[k] = 0.0
+        plant_dc = sum(inv_dc_map.values())
+        plant_actual_kwh = sum(actual_by_inv.values())
+        expected_mwh = (plant_dc * insolation) / 1000.0 if plant_dc > 0 and insolation > 0 else 0.0
+        actual_mwh = plant_actual_kwh / 1000.0
+        return {
+            "expected_mwh": round(expected_mwh, 4),
+            "actual_mwh": round(actual_mwh, 4),
+            "insolation_kwh_m2": round(insolation, 4),
+            "plant_dc_kwp": round(plant_dc, 4),
+        }
+    except Exception as exc:  # noqa: BLE001 — defensive; keep dashboard alive
+        _log.exception("compute_plant_expected_actual_mwh_for_range plant_id=%s", plant_id)
+        msg = str(exc)[:240] if str(exc) else "Computation failed for this range."
+        return {
+            "expected_mwh": None,
+            "actual_mwh": None,
+            "insolation_kwh_m2": None,
+            "plant_dc_kwp": None,
+            "compute_error": msg,
+        }
 
 
 @_loss_routes.get("/options")
@@ -598,10 +623,25 @@ def loss_bridge(
 ):
     """
     Build waterfall + table rows. Uses `loss_analysis_snapshot` when fresh vs raw_data_stats.
+    If SOLAR_SNAPSHOT_READ_ONLY=1, never runs heavy compute; 503 or stale per SOLAR_SNAPSHOT_ALLOW_STALE.
     """
     t0 = time.perf_counter()
     _from, _to = _fault_date_range(date_from, date_to)
     scope_l = (scope or "plant").strip().lower()
+    if snapshot_read_only_enabled():
+        got = load_loss_analysis_snapshot_any(db, plant_id, _from, _to, scope_l, equipment_id or "")
+        if got is None:
+            raise HTTPException(503, detail=SNAPSHOT_READ_ONLY_HTTP_DETAIL)
+        payload, fresh = got
+        if fresh:
+            record_snapshot("loss_bridge", True)
+            record_compute_ms("loss_bridge_http", (time.perf_counter() - t0) * 1000.0, f"hit ro plant={plant_id}")
+            return payload
+        if snapshot_allow_stale():
+            record_snapshot("loss_bridge", True)
+            record_compute_ms("loss_bridge_http", (time.perf_counter() - t0) * 1000.0, f"stale ro plant={plant_id}")
+            return attach_snapshot_stale_meta(payload)
+        raise HTTPException(503, detail=SNAPSHOT_STALE_HTTP_DETAIL)
     snap = get_loss_analysis_snapshot(db, plant_id, _from, _to, scope_l, equipment_id or "")
     if snap is not None:
         record_snapshot("loss_bridge", True)

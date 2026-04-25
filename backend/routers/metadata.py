@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime
 import traceback
 import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Query, Form
@@ -136,8 +137,9 @@ def _post_upload_refresh(plant_id: str, min_ts: Optional[str], max_ts: Optional[
             except Exception:
                 pass
 
+        stats_ok = False
         try:
-            _refresh_plant_stats(db, plant_id)
+            stats_ok = _refresh_plant_stats(db, plant_id)
         except Exception:
             try:
                 db.rollback()
@@ -152,18 +154,22 @@ def _post_upload_refresh(plant_id: str, min_ts: Optional[str], max_ts: Optional[
             except Exception:
                 pass
 
-        try:
-            from jobs.enqueue import enqueue_precompute_after_ingest
+        # Precompute jobs need raw_data_stats.updated_at as snapshot anchor; enqueue only after stats OK.
+        if stats_ok:
+            try:
+                from jobs.enqueue import enqueue_precompute_after_ingest
 
-            enqueue_precompute_after_ingest(db, plant_id, min_ts, max_ts)
-        except Exception:
-            logging.getLogger(__name__).exception("enqueue_precompute_failed plant=%s", plant_id)
+                enqueue_precompute_after_ingest(db, plant_id, min_ts, max_ts)
+            except Exception:
+                logging.getLogger(__name__).exception("enqueue_precompute_failed plant=%s", plant_id)
     finally:
         db.close()
 
 
-def _refresh_plant_stats(db: Session, plant_id: str) -> None:
-    """Recompute and upsert the raw_data_stats row for one plant. Fast future lookups."""
+def _refresh_plant_stats(db: Session, plant_id: str) -> bool:
+    """Recompute and upsert the raw_data_stats row for one plant. Fast future lookups.
+    Returns True if the row was updated successfully. Module snapshots use updated_at as
+    freshness anchor; enqueue precompute only after a successful refresh."""
     from sqlalchemy import func as sqlfunc
     try:
         agg = db.query(
@@ -182,24 +188,29 @@ def _refresh_plant_stats(db: Session, plant_id: str) -> None:
         ).filter(RawDataGeneric.plant_id == plant_id).group_by(RawDataGeneric.equipment_level).all()
         levels = {r[0]: r[1] for r in levels_q}
 
+        now = datetime.utcnow()
         existing = db.query(RawDataStats).filter(RawDataStats.plant_id == plant_id).first()
         if existing:
             existing.total_rows = total
             existing.min_ts = min_ts
             existing.max_ts = max_ts
             existing.levels_json = json.dumps(levels)
+            existing.updated_at = now
         else:
             db.add(RawDataStats(
                 plant_id=plant_id, total_rows=total,
                 min_ts=min_ts, max_ts=max_ts,
-                levels_json=json.dumps(levels)
+                levels_json=json.dumps(levels),
+                updated_at=now,
             ))
         db.commit()
+        return True
     except Exception:
         try:
             db.rollback()
         except Exception:
             pass
+        return False
 _UPLOADS_DIR = os.path.join(_BACKEND_DIR, "uploads", "spec_sheets")
 
 

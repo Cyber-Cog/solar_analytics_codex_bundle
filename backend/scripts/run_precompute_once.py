@@ -40,6 +40,7 @@ def main() -> int:
         compute_snapshots_for_range,
         resolve_recompute_day_range,
         update_plant_compute_status,
+        validate_or_refresh_raw_data_stats,
     )
 
     db = SessionLocal()
@@ -63,11 +64,18 @@ def main() -> int:
 
         for p in plants:
             pid = p.plant_id
-            d0, d1 = resolve_recompute_day_range(db, pid, None, None)
+            st = validate_or_refresh_raw_data_stats(db, pid)
+            d0, d1 = resolve_recompute_day_range(
+                db,
+                pid,
+                st.min_ts if st else None,
+                st.max_ts if st else None,
+            )
             print(f"--- {pid} ({p.name})  {d0} .. {d1} ---")
             update_plant_compute_status(db, pid, status="running", date_from=d0, date_to=d1)
             try:
                 out = compute_snapshots_for_range(db, pid, d0, d1, user)
+                warm_fault_runtime_snapshots(pid, d0, d1)
                 sec = max(1, int((out.get("total_ms") or 0) / 1000))
                 update_plant_compute_status(
                     db, pid, status="done", date_from=d0, date_to=d1, duration_seconds=sec
@@ -88,6 +96,41 @@ def main() -> int:
         return 0
     finally:
         db.close()
+
+
+def warm_fault_runtime_snapshots(plant_id: str, date_from: str, date_to: str) -> None:
+    """Warm durable PL/IS/GB/comm/CD tab payloads for the same range."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from database import SessionLocal
+    from routers.faults import (
+        _cd_tab_with_cache,
+        _comm_tab_with_cache,
+        _gb_tab_with_cache,
+        _is_tab_with_cache,
+        _pl_page_with_cache,
+    )
+
+    funcs = {
+        "pl_page": _pl_page_with_cache,
+        "is_tab": _is_tab_with_cache,
+        "gb_tab": _gb_tab_with_cache,
+        "comm_tab": _comm_tab_with_cache,
+        "cd_tab": _cd_tab_with_cache,
+    }
+
+    def _run(name, fn):
+        s = SessionLocal()
+        try:
+            fn(s, plant_id, date_from, date_to)
+            return name
+        finally:
+            s.close()
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futs = [pool.submit(_run, name, fn) for name, fn in funcs.items()]
+        for fut in as_completed(futs):
+            print("runtime snapshot OK", fut.result())
 
 
 if __name__ == "__main__":

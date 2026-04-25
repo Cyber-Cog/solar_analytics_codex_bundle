@@ -18,6 +18,7 @@ window.PerfAdminPanel = () => {
   const [precomputeStatus, setPrecomputeStatus] = useState(null);
   const [precomputeRunning, setPrecomputeRunning] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [pollFast, setPollFast] = useState(false);
   const intervalRef = useRef(null);
 
   const loadData = async () => {
@@ -31,7 +32,9 @@ window.PerfAdminPanel = () => {
       setDbHealth(db);
       setEndpointStats(ep);
       setPrecomputeStatus(ov.precompute);
-      setPrecomputeRunning(ov.precompute?.running || false);
+      const r = ov.precompute?.running || false;
+      setPrecomputeRunning(r);
+      setPollFast(r);
       setError(null);
     } catch (e) {
       setError(e.message || 'Failed to load performance data');
@@ -47,20 +50,36 @@ window.PerfAdminPanel = () => {
 
   useEffect(() => {
     if (intervalRef.current) clearInterval(intervalRef.current);
-    if (autoRefresh) {
-      intervalRef.current = setInterval(loadData, 15000);
+    const ms = pollFast ? 1200 : (autoRefresh ? 15000 : 0);
+    if (ms > 0) {
+      intervalRef.current = setInterval(loadData, ms);
     }
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
-  }, [autoRefresh]);
+  }, [autoRefresh, pollFast]);
+
+  const formatEta = (sec) => {
+    if (sec == null || sec === '' || Number.isNaN(Number(sec))) return '—';
+    const s = Math.max(0, Math.floor(Number(sec)));
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m}m ${r}s`;
+  };
 
   const handlePrecompute = async () => {
     if (precomputeRunning) return;
-    if (!confirm('Run the precompute engine? This will warm caches for all plants in the background (may take several minutes).')) return;
+    if (!confirm(
+      'Run the FULL FAULT & ANALYTICS pipeline for all plants?\n\n' +
+      'This computes module snapshots (DS summary, unified fault feed, loss bridge, category KPI rows) ' +
+      'and runs all fault tab engines (power limitation, inverter shutdown, grid breakdown, communication, clipping/derating) ' +
+      'for each plant’s raw-data date range. It may take several minutes.\n\n' +
+      'It does NOT re-run disconnected-string detection on raw SCB time series (that runs on data ingest).'
+    )) return;
     try {
       const r = await window.SolarAPI.Admin.runPrecompute();
       setPrecomputeRunning(true);
-      alert(r.message || 'Precompute started');
-      setTimeout(loadData, 3000);
+      setPollFast(true);
+      setTimeout(loadData, 500);
     } catch (e) {
       alert('Failed: ' + (e.message || e));
     }
@@ -195,24 +214,63 @@ window.PerfAdminPanel = () => {
       h(Card, { title: 'Cache Hit Rate' },
         h(CacheGauge, { hits: cache.hits, misses: cache.misses })
       ),
-      h(Card, { title: 'Precompute Engine' },
+      h(Card, { title: 'Full fault & snapshot pipeline' },
         h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } },
-          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
             h(Badge, { type: precomp.running ? 'amber' : 'green' }, precomp.running ? 'Running' : 'Idle'),
-            precomp.running && h('span', { style: { fontSize: 11, color: 'var(--text-muted)' } },
-              `Plant ${precomp.plants_done || 0}/${precomp.plants_total || 0}: ${precomp.current_plant || '...'}`)
+            precomp.mode && precomp.mode !== 'idle' && h('span', { style: { fontSize: 11, color: 'var(--text-muted)' } },
+              'Mode: ' + String(precomp.mode)),
+          ),
+          h('div', { style: { width: '100%', height: 10, background: 'var(--line)', borderRadius: 5, overflow: 'hidden' } },
+            h('div', {
+              style: {
+                width: (Math.min(100, precomp.percent != null ? Number(precomp.percent) : 0)) + '%',
+                height: '100%',
+                background: precomp.running ? '#0ea5e9' : '#22c55e',
+                borderRadius: 5,
+                transition: 'width 0.3s ease',
+              },
+            }),
+          ),
+          h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 6, fontSize: 11, color: 'var(--text-muted)' } },
+            h('div', null, h('strong', { style: { color: 'var(--text)' } }, 'Progress: '), (precomp.percent != null ? precomp.percent : '0') + ' %'),
+            h('div', null, h('strong', { style: { color: 'var(--text)' } }, 'Plants: '), (precomp.plants_done != null ? precomp.plants_done : 0) + ' / ' + (precomp.plants_total != null ? precomp.plants_total : 0)),
+            h('div', { style: { gridColumn: 'span 2' } }, h('strong', { style: { color: 'var(--text)' } }, 'Current: '), (precomp.current_plant || '—') + (precomp.step ? ' · ' + precomp.step : '')),
+            h('div', null, h('strong', { style: { color: 'var(--text)' } }, 'Elapsed: '), (precomp.elapsed_seconds != null ? precomp.elapsed_seconds + ' s' : '—')),
+            h('div', null, h('strong', { style: { color: 'var(--text)' } }, 'Est. remaining: '), formatEta(precomp.eta_seconds)),
+            precomp.started_at && h('div', { style: { gridColumn: '1 / -1' } },
+              h('strong', { style: { color: 'var(--text)' } }, 'Started: '),
+              new Date(precomp.started_at).toLocaleString()
+            ),
+          ),
+          (precomp.event_log && precomp.event_log.length > 0) && h('div', {
+            style: {
+              maxHeight: 200,
+              overflow: 'auto',
+              fontSize: 10,
+              fontFamily: 'ui-monospace, Consolas, monospace',
+              background: 'rgba(0,0,0,0.15)',
+              border: '1px solid var(--line)',
+              borderRadius: 8,
+              padding: 8,
+            },
+          },
+            precomp.event_log.slice(-80).map((e, idx) => h('div', { key: idx, style: { marginBottom: 4, color: 'var(--text)' } },
+              h('span', { style: { color: 'var(--text-muted)' } }, (e.t || '').replace('T', ' ').slice(0, 19), '  '),
+              e.message
+            ))
           ),
           precomp.last_run && h('div', { style: { fontSize: 11, color: 'var(--text-muted)' } },
-            `Last run: ${new Date(precomp.last_run).toLocaleString()} (${precomp.last_duration_s || '?'}s)`),
+            `Last run: ${new Date(precomp.last_run).toLocaleString()} (${precomp.last_duration_s != null ? precomp.last_duration_s : '?'}s)`),
           precomp.last_error && h('div', { style: { fontSize: 11, color: '#ef4444' } }, 'Error: ' + precomp.last_error),
           h('button', {
             className: 'btn btn-primary',
             style: { padding: '6px 12px', fontSize: 12 },
             disabled: precomp.running,
             onClick: handlePrecompute
-          }, precomp.running ? 'Running…' : '▶ Run Precompute Engine'),
-          h('p', { style: { fontSize: 10, color: 'var(--text-muted)', margin: 0 } },
-            'Warms dashboard + fault caches for all plants. Runs in background thread.')
+          }, precomp.running ? 'Running full pipeline…' : '▶ Run full fault & snapshot pipeline'),
+          h('p', { style: { fontSize: 10, color: 'var(--text-muted)', margin: 0, lineHeight: 1.45 } },
+            'Module snapshots (DS, unified, loss) + five fault tab engines per plant, same date range as precompute/ingest. Progress updates every ~1.2s while running. See docs/PERFORMANCE_AND_FAULT_PIPELINE_AUDIT.md for detail.')
         )
       )
     ),

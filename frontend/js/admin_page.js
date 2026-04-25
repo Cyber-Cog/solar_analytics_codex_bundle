@@ -479,7 +479,8 @@ window.AdminPage = (props = {}) => {
         h('p', { style: { fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 } },
           'Fills module snapshot tables (DS summary, unified fault feed, loss bridge) and warms fault tab caches for the selected date range. ' +
           'If automatic precompute after upload fails, use this. Leave dates empty to use each plant’s raw data min/max. ' +
-          'Set chunk size (e.g. 62 days) to split long history into many small jobs so the background worker can finish them reliably.'
+          'Set chunk size (e.g. 62 days) to split long history into many small jobs so the background worker can finish them reliably. ' +
+          'For a single action that runs all fault engines with a progress bar and ETA, use the Performance tab (Run full fault & snapshot pipeline).'
         ),
         h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center', marginBottom: 12 } },
           h('label', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' } },

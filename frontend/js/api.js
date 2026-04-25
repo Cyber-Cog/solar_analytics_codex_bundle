@@ -56,6 +56,12 @@ const getUser   = () => { try { return JSON.parse(localStorage.getItem('solar_us
 const setUser   = (u) => localStorage.setItem('solar_user', JSON.stringify(u));
 const _inflightGet = new Map();
 
+function allowLegacyUnifiedFeedFallback() {
+  if (localStorage.getItem('solar_allow_unified_fallback') === '1') return true;
+  const host = String(window.location.hostname || '').toLowerCase();
+  return host === 'localhost' || host === '127.0.0.1';
+}
+
 // ── Route-scoped AbortControllers ────────────────────────────────────────────
 // Every call that passes `{ signal }` will be cancellable individually. For the
 // common case where a page just wants to abort *everything* in flight when the
@@ -171,8 +177,18 @@ const Plants = {
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
 const Dashboard = {
-  bundle:            (plantId, from, to) =>
-    apiFetch(`/api/dashboard/bundle?plant_id=${encodeURIComponent(plantId || '')}&date_from=${encodeURIComponent(from || '')}&date_to=${encodeURIComponent(to || '')}`),
+  /** @param opts {{ lite?: boolean }} lite=true → omit target_generation in bundle (faster; use targetGeneration() after) */
+  bundle:            (plantId, from, to, opts) => {
+    const q = new URLSearchParams({
+      plant_id: plantId || '',
+      date_from: from || '',
+      date_to: to || '',
+    });
+    if (opts && opts.lite) q.set('include_target_generation', '0');
+    return apiFetch(`/api/dashboard/bundle?${q.toString()}`);
+  },
+  targetGeneration:  (plantId, from, to) =>
+    apiFetch(`/api/dashboard/target-generation?plant_id=${encodeURIComponent(plantId || '')}&date_from=${encodeURIComponent(from || '')}&date_to=${encodeURIComponent(to || '')}`),
   stationDetails:    (plantId) => apiFetch(`/api/dashboard/station-details?plant_id=${encodeURIComponent(plantId || '')}`),
   energy:            (plantId, from, to) =>
     apiFetch(`/api/dashboard/energy?plant_id=${encodeURIComponent(plantId || '')}&date_from=${encodeURIComponent(from || '')}&date_to=${encodeURIComponent(to || '')}`),
@@ -528,12 +544,13 @@ const Faults = {
     } catch (e) {
       const msg = String((e && e.message) || e);
       const st = e && e.status;
+      const allowFallback = allowLegacyUnifiedFeedFallback();
       // Stale API (404) or server overload / DB timeout (5xx) — merge legacy endpoints so Overview still loads.
-      if (st >= 500 && st < 600) {
+      if (allowFallback && st >= 500 && st < 600) {
         console.warn('unified-feed returned', st, msg.slice(0, 200), '— using client-side merge (slower).');
         return buildUnifiedFeedClientSide(plantId, from, to);
       }
-      if (!/not found|404/i.test(msg)) throw e;
+      if (!allowFallback || !/not found|404/i.test(msg)) throw e;
       return buildUnifiedFeedClientSide(plantId, from, to);
     }
   },

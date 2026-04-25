@@ -9,7 +9,7 @@ table is added here to support authentication and multi-plant selection.
 
 from sqlalchemy import (
     Column, Integer, BigInteger, String, Float, Text,
-    DateTime, Boolean, ForeignKey, UniqueConstraint, Index
+    DateTime, Boolean, ForeignKey, UniqueConstraint, Index,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -58,6 +58,7 @@ class RawDataGeneric(Base):
     id              = Column(Integer, primary_key=True, autoincrement=True)
     plant_id        = Column(String, nullable=False, index=True)
     timestamp       = Column(String, nullable=False, index=True)
+    timestamp_ts    = Column(DateTime(timezone=True), nullable=True)
     equipment_level = Column(String, nullable=False)
     equipment_id    = Column(String, nullable=False, index=True)
     signal          = Column(String, nullable=False)
@@ -334,6 +335,23 @@ class DsSummarySnapshot(Base):
     )
 
 
+class DsStatusSnapshot(Base):
+    """Cached JSON for `/api/faults/ds-scb-status` per plant + date range."""
+
+    __tablename__ = "ds_status_snapshot"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    plant_id = Column(String, nullable=False, index=True)
+    date_from = Column(String(32), nullable=False, default="")
+    date_to = Column(String(32), nullable=False, default="")
+    payload_json = Column(Text, nullable=False)
+    computed_at = Column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("plant_id", "date_from", "date_to", name="uq_ds_status_snapshot"),
+    )
+
+
 class UnifiedFaultSnapshot(Base):
     """Cached JSON for `/api/faults/unified-feed` (categories + rows + totals)."""
 
@@ -370,6 +388,33 @@ class LossAnalysisSnapshot(Base):
             "plant_id", "date_from", "date_to", "scope", "equipment_id",
             name="uq_loss_analysis_snapshot",
         ),
+    )
+
+
+class UnifiedFeedCategoryTotal(Base):
+    """
+    Narrow SQL-friendly copy of unified-feed category tiles (loss_mwh, fault_count per category_id).
+    Filled by module precompute alongside unified_fault_snapshot JSON; use for reporting / BI
+    without parsing payload_json. Detail rows stay in the JSON snapshot only.
+    """
+
+    __tablename__ = "unified_feed_category_totals"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    plant_id = Column(String, nullable=False, index=True)
+    date_from = Column(String(32), nullable=False)
+    date_to = Column(String(32), nullable=False)
+    category_id = Column(String(32), nullable=False)
+    loss_mwh = Column(Float, nullable=False, default=0.0)
+    fault_count = Column(Integer, nullable=False, default=0)
+    computed_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "plant_id", "date_from", "date_to", "category_id",
+            name="uq_unified_feed_category_totals",
+        ),
+        Index("idx_ufct_plant_computed", "plant_id", "computed_at"),
     )
 
 

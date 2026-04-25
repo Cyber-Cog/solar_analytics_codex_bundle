@@ -821,6 +821,21 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
         style: { padding: 20, marginBottom: 16, borderRadius: 12, border: '1px solid var(--border)' },
       }, h('strong', { style: { display: 'block', marginBottom: 8 } }, 'Could not load unified feed'), unifiedErr),
       !unifiedLoading && !unifiedErr && unifiedFeed && h(React.Fragment, null,
+        unifiedFeed._snapshot_meta && unifiedFeed._snapshot_meta.stale && h('div', {
+          role: 'status',
+          style: {
+            marginBottom: 12,
+            padding: '10px 14px',
+            borderRadius: 10,
+            fontSize: 12,
+            background: 'rgba(245,158,11,0.12)',
+            border: '1px solid rgba(245,158,11,0.4)',
+            color: 'var(--text-soft)',
+            lineHeight: 1.45,
+          },
+        },
+          h('strong', { style: { color: '#fbbf24' } }, 'Snapshot is stale: '),
+          (unifiedFeed._snapshot_meta.message || 'Run the precompute worker to refresh the numbers.')),
         unifiedFeed._merged_on_client && h('div', {
           role: 'status',
           style: {
@@ -3140,7 +3155,6 @@ const FaultDetailModal = ({ scbId, scbStringsMap, archList = [], plantId, dateFr
 };
 
 console.info('[solar-trace] fault_page.js initialization complete (window.FaultPage set)');
-
 
 
 

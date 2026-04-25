@@ -1,6 +1,8 @@
 // frontend/js/pages.js  - UAT-fixed version
 // Fixed: File upload in Metadata, auth-safe template download,
-const { useState, useEffect, useCallback } = React;
+const { useState, useEffect, useCallback, useRef } = React;
+
+const DASH_DATE_DEBOUNCE_MS = 300;
 
 // ── Shared upload helper (multipart/form-data with JWT) ───────────────────────
 async function uploadExcel(endpoint, file) {
@@ -128,12 +130,59 @@ window.DashboardPage = ({ plantId, dateFrom, dateTo, onNavigate }) => {
   const [powerGti, setPowerGti] = useState([]);
   const [noData, setNoData]     = useState(false);
   const [targetGeneration, setTargetGeneration] = useState(null);
+  /** While true, /target-generation is in flight — child must not hit LossAnalysis.bridge. */
+  const [apiTargetGenPending, setApiTargetGenPending] = useState(false);
+  const [dashboardLoading, setDashboardLoading] = useState(false);
+  const [fetchRange, setFetchRange] = useState({ from: dateFrom, to: dateTo });
+  const debounceFirstPlant = useRef(true);
+
+  useEffect(() => {
+    debounceFirstPlant.current = true;
+    setFetchRange({ from: dateFrom, to: dateTo });
+  }, [plantId]);
+
+  useEffect(() => {
+    if (!plantId) return;
+    if (debounceFirstPlant.current) {
+      debounceFirstPlant.current = false;
+      setFetchRange({ from: dateFrom, to: dateTo });
+      return;
+    }
+    const t = setTimeout(
+      () => setFetchRange({ from: dateFrom, to: dateTo }),
+      DASH_DATE_DEBOUNCE_MS
+    );
+    return () => clearTimeout(t);
+  }, [dateFrom, dateTo, plantId]);
 
   const loadDashboardData = useCallback((currentDateFrom, currentDateTo) => {
     if (!plantId) return () => {};
     let ignore = false;
     setNoData(false);
-    window.SolarAPI.Dashboard.bundle(plantId, currentDateFrom, currentDateTo)
+    setDashboardLoading(true);
+    setTargetGeneration(null);
+    setApiTargetGenPending(true);
+    const fetchBundle = () => window.SolarAPI.Dashboard.bundle(plantId, currentDateFrom, currentDateTo, { lite: true });
+    const withRetry = () =>
+      fetchBundle().catch((err) => {
+        const st = err && err.status;
+        if (st === 401 || st === 403) throw err;
+        if (st === 502 || st === 503 || st === 504 || st === 429 || st == null) {
+          return new Promise((r) => setTimeout(r, 400)).then(() => fetchBundle());
+        }
+        throw err;
+      });
+    // Run expected/actual API in parallel with the lite bundle (not after it), so TTFB ≈ max(bundle, tg).
+    const tgPromise = window.SolarAPI.Dashboard.targetGeneration(plantId, currentDateFrom, currentDateTo)
+      .then((tg) => {
+        if (ignore) return;
+        if (tg && typeof tg === 'object') setTargetGeneration(tg);
+      })
+      .catch(() => { /* child may use bridge fallback */ })
+      .finally(() => { if (!ignore) setApiTargetGenPending(false); });
+
+    void tgPromise;
+    withRetry()
       .then((b) => {
         if (ignore) return;
         setStation(b.station || null);
@@ -142,14 +191,15 @@ window.DashboardPage = ({ plantId, dateFrom, dateTo, onNavigate }) => {
         setEnergy(Array.isArray(b.energy) ? b.energy : []);
         setInvTable(Array.isArray(b.inverter_performance) ? b.inverter_performance : []);
         setPowerGti(Array.isArray(b.power_vs_gti) ? b.power_vs_gti : []);
-        setTargetGeneration(b.target_generation && typeof b.target_generation === 'object' ? b.target_generation : null);
         setNoData(
           (Array.isArray(b.power_vs_gti) ? b.power_vs_gti.length : 0) === 0 &&
           (Array.isArray(b.energy) ? b.energy.length : 0) === 0
         );
+        if (!ignore) setDashboardLoading(false);
       })
       .catch(() => {
         if (ignore) return;
+        setApiTargetGenPending(true);
         Promise.all([
           window.SolarAPI.Dashboard.stationDetails(plantId).catch(() => null),
           window.SolarAPI.Dashboard.kpis(plantId, currentDateFrom, currentDateTo).catch(() => null),
@@ -157,28 +207,31 @@ window.DashboardPage = ({ plantId, dateFrom, dateTo, onNavigate }) => {
           window.SolarAPI.Dashboard.energy(plantId, currentDateFrom, currentDateTo).catch(() => []),
           window.SolarAPI.Dashboard.inverterPerf(plantId, currentDateFrom, currentDateTo).catch(() => []),
           window.SolarAPI.Dashboard.powerVsGti(plantId, currentDateFrom, currentDateTo).catch(() => []),
-        ]).then(([station, kpis, wms, energyRes, invTableRes, powerGtiRes]) => {
+          window.SolarAPI.Dashboard.targetGeneration(plantId, currentDateFrom, currentDateTo).catch(() => null),
+        ]).then(([st, kp, wm, energyRes, invTableRes, powerGtiRes, tgRes]) => {
           if (ignore) return;
-          setStation(station || null);
-          setKpis(kpis || null);
-          setWms(wms || null);
+          setStation(st || null);
+          setKpis(kp || null);
+          setWms(wm || null);
           setEnergy(Array.isArray(energyRes) ? energyRes : []);
           setInvTable(Array.isArray(invTableRes) ? invTableRes : []);
           setPowerGti(Array.isArray(powerGtiRes) ? powerGtiRes : []);
-          setTargetGeneration(null);
+          setTargetGeneration(tgRes && typeof tgRes === 'object' ? tgRes : null);
           setNoData(
             (Array.isArray(powerGtiRes) ? powerGtiRes.length : 0) === 0 &&
             (Array.isArray(energyRes) ? energyRes.length : 0) === 0
           );
-        });
+        })
+          .finally(() => { if (!ignore) { setApiTargetGenPending(false); setDashboardLoading(false); } });
       });
     return () => { ignore = true; };
   }, [plantId]);
 
   useEffect(() => {
-    const cleanup = loadDashboardData(dateFrom, dateTo);
+    if (!plantId) return;
+    const cleanup = loadDashboardData(fetchRange.from, fetchRange.to);
     return cleanup;
-  }, [loadDashboardData, dateFrom, dateTo]);
+  }, [loadDashboardData, fetchRange, plantId]);
 
   const fmtNum = (v, d=1) => v != null ? Number(v).toFixed(d) : '-';
   /** Prefer energy_export_kwh / net_generation_kwh as source of truth so MWh is never confused with kWh. */
@@ -355,7 +408,30 @@ window.DashboardPage = ({ plantId, dateFrom, dateTo, onNavigate }) => {
   const heroOnline   = heroStatus === 'Active' || heroStatus === 'active';
   const heroCapacity = station?.capacity_mwp ? `${station.capacity_mwp} MWp` : null;
 
-  return h('div', null,
+  return h('div', { style: { position: 'relative' } },
+    dashboardLoading && h('div', {
+      'aria-busy': true,
+      style: {
+        position: 'absolute',
+        top: 8,
+        right: 8,
+        zIndex: 5,
+        fontSize: 11,
+        fontWeight: 700,
+        padding: '4px 10px',
+        borderRadius: 8,
+        background: 'var(--panel, rgba(15,23,42,0.75))',
+        color: 'var(--text-soft, #94a3b8)',
+        pointerEvents: 'none',
+      },
+    }, 'Updating…'),
+    h('div', {
+      style: {
+        opacity: dashboardLoading ? 0.68 : 1,
+        pointerEvents: dashboardLoading ? 'none' : 'auto',
+        transition: 'opacity 0.18s ease',
+      },
+    },
     // ── Plant context strip: operational metadata that gives meaning to the KPIs below.
     // Deliberately does NOT repeat Energy/Power/PR — those live in the KPI tiles. ──
     station && h('div', { className:'plant-hero', style: { justifyContent: 'space-between' } },
@@ -426,7 +502,7 @@ window.DashboardPage = ({ plantId, dateFrom, dateTo, onNavigate }) => {
     // ── DS Insights ─────────────────────────────────────────────────────────
     // ── Target vs Actual Generation (Hourly Cumulate, Manual input) ────────
     h('div', { style:{display:'grid', gridTemplateColumns:'2fr 1fr', gap:16, marginBottom:16, alignItems:'stretch'} },
-      h(window.DashboardTargetGeneration, { plantId, dateFrom, dateTo, targetGeneration }),
+      h(window.DashboardTargetGeneration, { plantId, dateFrom, dateTo, targetGeneration, apiTargetGenPending }),
       h(Card, { title:'WMS - Weather Sensors', style:{ minHeight: 480, display:'flex', flexDirection:'column' } },
         h('div', { className:'kpi-grid kpi-grid--performance', style:{ gridTemplateColumns:'repeat(2, 1fr)', flex:1 } },
           h(KpiCard, { variant:'performance', subVariant:'wms-ghi', label:'Insolation (GHI)', value:fmtNum(wms?.ghi,2), unit:'kWh/m²', color:'#d97706', icon:'Sun' }),
@@ -500,6 +576,7 @@ window.DashboardPage = ({ plantId, dateFrom, dateTo, onNavigate }) => {
           )
         )
       ),
+    )
     )
   );
 };

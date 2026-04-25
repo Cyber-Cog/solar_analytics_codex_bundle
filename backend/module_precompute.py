@@ -20,8 +20,10 @@ from models import PlantComputeStatus, RawDataStats, User
 from module_snapshots import (
     apply_snapshot_retention,
     save_ds_summary_snapshot,
+    save_ds_status_snapshot,
     save_loss_analysis_snapshot,
     save_unified_fault_snapshot,
+    upsert_unified_feed_category_totals_from_payload,
 )
 from snap_perf import Timer
 
@@ -77,24 +79,27 @@ def compute_snapshots_for_range(
     Recompute and UPSERT snapshots for one plant + inclusive date range.
     Returns simple metrics for logging/monitoring.
     """
-    from routers.faults import build_ds_summary_dict, _unified_feed_rows_and_categories
+    from routers.faults import build_ds_scb_status_payload, build_ds_summary_dict, _unified_feed_rows_and_categories
     from routers.loss_analysis import build_loss_bridge_payload
 
     t0 = time.perf_counter()
-    rows_hint = 0
-    try:
-        st = db.query(RawDataStats).filter(RawDataStats.plant_id == plant_id).first()
-        rows_hint = int(st.total_rows or 0) if st else 0
-    except Exception:
-        pass
+    st = validate_or_refresh_raw_data_stats(db, plant_id)
+    rows_hint = int(st.total_rows or 0) if st else 0
 
     with Timer("ds_summary_snapshot", f"plant={plant_id}"):
         ds_payload = build_ds_summary_dict(db, plant_id, date_from, date_to)
         save_ds_summary_snapshot(db, plant_id, date_from, date_to, ds_payload)
 
+    with Timer("ds_status_snapshot", f"plant={plant_id}"):
+        ds_status_payload = build_ds_scb_status_payload(db, plant_id, date_from, date_to)
+        save_ds_status_snapshot(db, plant_id, date_from, date_to, ds_status_payload)
+
     with Timer("unified_fault_snapshot", f"plant={plant_id}"):
         unified_payload = _unified_feed_rows_and_categories(db, plant_id, date_from, date_to, user)
         save_unified_fault_snapshot(db, plant_id, date_from, date_to, unified_payload)
+        upsert_unified_feed_category_totals_from_payload(
+            db, plant_id, date_from, date_to, unified_payload
+        )
 
     with Timer("loss_bridge_snapshot", f"plant={plant_id}"):
         loss_payload = build_loss_bridge_payload(
@@ -124,6 +129,49 @@ def compute_snapshots_for_range(
         "total_ms": round(elapsed_ms, 1),
         "raw_rows_hint": rows_hint,
     }
+
+
+def validate_or_refresh_raw_data_stats(db: Session, plant_id: str) -> Optional[RawDataStats]:
+    """
+    Keep raw_data_stats aligned with the raw table before snapshots are anchored.
+    This is intentionally used in precompute/admin paths, not lightweight API reads.
+    """
+    from sqlalchemy import func as sqlfunc
+    from models import RawDataGeneric
+
+    try:
+        agg = db.query(
+            sqlfunc.count(RawDataGeneric.id).label("total"),
+            sqlfunc.min(RawDataGeneric.timestamp).label("min_ts"),
+            sqlfunc.max(RawDataGeneric.timestamp).label("max_ts"),
+        ).filter(RawDataGeneric.plant_id == plant_id).first()
+        total = int(agg.total or 0) if agg else 0
+        min_ts = str(agg.min_ts) if agg and agg.min_ts else None
+        max_ts = str(agg.max_ts) if agg and agg.max_ts else None
+        row = db.query(RawDataStats).filter(RawDataStats.plant_id == plant_id).first()
+        if not row:
+            row = RawDataStats(plant_id=plant_id)
+            db.add(row)
+        changed = (
+            int(row.total_rows or 0) != total
+            or (row.min_ts or None) != min_ts
+            or (row.max_ts or None) != max_ts
+        )
+        if changed:
+            row.total_rows = total
+            row.min_ts = min_ts
+            row.max_ts = max_ts
+            row.updated_at = datetime.utcnow()
+            db.commit()
+            log.warning(
+                "raw_data_stats_repaired plant=%s rows=%s min=%s max=%s",
+                plant_id, total, min_ts, max_ts,
+            )
+        return row
+    except Exception:
+        db.rollback()
+        log.exception("raw_data_stats_validation_failed plant=%s", plant_id)
+        return db.query(RawDataStats).filter(RawDataStats.plant_id == plant_id).first()
 
 
 def update_plant_compute_status(

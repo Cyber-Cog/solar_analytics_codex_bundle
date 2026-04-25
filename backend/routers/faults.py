@@ -3,7 +3,7 @@ import logging
 import time
 from datetime import date as _date
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from sqlalchemy import func
@@ -24,16 +24,29 @@ from soiling_queries import (
 from models import User, FaultDiagnostics, FaultEpisode, EquipmentSpec, ScbFaultReview
 from fault_cache import get_cached
 from module_snapshots import (
+    SNAPSHOT_READ_ONLY_HTTP_DETAIL,
+    SNAPSHOT_STALE_HTTP_DETAIL,
+    attach_snapshot_stale_meta,
+    get_ds_status_snapshot,
     get_ds_summary_snapshot,
-    save_ds_summary_snapshot,
     get_unified_fault_snapshot,
+    load_ds_status_snapshot_any,
+    load_ds_summary_snapshot_any,
+    load_unified_fault_snapshot_any,
+    save_ds_status_snapshot,
+    save_ds_summary_snapshot,
     save_unified_fault_snapshot,
+    snapshot_allow_stale,
+    snapshot_read_only_enabled,
+    upsert_unified_feed_category_totals_from_payload,
 )
 from dashboard_cache import get as _dc_get, set as _dc_set
 from fault_runtime_snapshot import (
     KIND_PL_PAGE,
     KIND_IS_TAB,
     KIND_GB_TAB,
+    KIND_COMM_TAB,
+    KIND_CD_TAB,
     try_snapshot_payload,
     save_snapshot_payload,
 )
@@ -49,7 +62,6 @@ _MEM_COMM_TAB = "faults_comm_tab_v2"
 _MEM_INV_EFF_AGG = "faults_inv_eff_agg_v1"
 _MEM_CD_TAB = "faults_cd_tab_v3_fast"
 _MEM_RUNTIME_TABS_BUNDLE = "faults_runtime_tabs_bundle_v7"
-
 
 def _compute_inv_eff_aggregate(db: Session, plant_id: str, _from: str, _to: str) -> Tuple[float, int]:
     """Lightweight SQL-side aggregation of inverter DC→AC conversion loss for unified-feed tiles.
@@ -243,8 +255,13 @@ def _comm_tab_with_cache(db: Session, plant_id: str, _from: str, _to: str) -> di
     hit = _dc_get(_MEM_COMM_TAB, plant_id, _from, _to)
     if hit is not None:
         return hit
+    snap = try_snapshot_payload(db, plant_id, _from, _to, KIND_COMM_TAB)
+    if snap is not None:
+        _dc_set(_MEM_COMM_TAB, plant_id, _from, _to, snap)
+        return snap
     out = _compute_comm_tab(db, plant_id, _from, _to)
     _dc_set(_MEM_COMM_TAB, plant_id, _from, _to, out)
+    save_snapshot_payload(db, plant_id, _from, _to, KIND_COMM_TAB, out)
     return out
 
 
@@ -276,8 +293,13 @@ def _cd_tab_with_cache(db: Session, plant_id: str, _from: str, _to: str) -> dict
     hit = _dc_get(_MEM_CD_TAB, plant_id, _from, _to)
     if hit is not None:
         return hit
+    snap = try_snapshot_payload(db, plant_id, _from, _to, KIND_CD_TAB)
+    if snap is not None:
+        _dc_set(_MEM_CD_TAB, plant_id, _from, _to, snap)
+        return snap
     out = _compute_cd_tab(db, plant_id, _from, _to)
     _dc_set(_MEM_CD_TAB, plant_id, _from, _to, out)
+    save_snapshot_payload(db, plant_id, _from, _to, KIND_CD_TAB, out)
     return out
 
 
@@ -628,16 +650,32 @@ def get_ds_summary(
     """
     Returns high-level insights for the Dashboard.
     Reads from `ds_summary_snapshot` when fresh vs `raw_data_stats.updated_at`, else computes and stores.
+    If SOLAR_SNAPSHOT_READ_ONLY=1, never runs heavy compute; returns 503 or stale snapshot per SOLAR_SNAPSHOT_ALLOW_STALE.
     """
     t0 = time.perf_counter()
-    hit = get_ds_summary_snapshot(db, plant_id, date_from or "", date_to or "")
+    key_from, key_to = date_from or "", date_to or ""
+    if snapshot_read_only_enabled():
+        got = load_ds_summary_snapshot_any(db, plant_id, key_from, key_to)
+        if got is None:
+            raise HTTPException(503, detail=SNAPSHOT_READ_ONLY_HTTP_DETAIL)
+        payload, fresh = got
+        if fresh:
+            record_snapshot("ds_summary", True)
+            record_compute_ms("ds_summary_http", (time.perf_counter() - t0) * 1000.0, f"hit ro plant={plant_id}")
+            return payload
+        if snapshot_allow_stale():
+            record_snapshot("ds_summary", True)
+            record_compute_ms("ds_summary_http", (time.perf_counter() - t0) * 1000.0, f"stale ro plant={plant_id}")
+            return attach_snapshot_stale_meta(payload)
+        raise HTTPException(503, detail=SNAPSHOT_STALE_HTTP_DETAIL)
+    hit = get_ds_summary_snapshot(db, plant_id, key_from, key_to)
     if hit is not None:
         record_snapshot("ds_summary", True)
         record_compute_ms("ds_summary_http", (time.perf_counter() - t0) * 1000.0, f"hit plant={plant_id}")
         return hit
     record_snapshot("ds_summary", False)
     out = build_ds_summary_dict(db, plant_id, date_from, date_to)
-    save_ds_summary_snapshot(db, plant_id, date_from or "", date_to or "", out)
+    save_ds_summary_snapshot(db, plant_id, key_from, key_to, out)
     record_compute_ms("ds_summary_http", (time.perf_counter() - t0) * 1000.0, f"miss plant={plant_id}")
     return out
 
@@ -665,14 +703,12 @@ def _serialize_fault_row(r):
     }
 
 
-@router.get("/ds-scb-status")
-def get_ds_scb_status(
-    plant_id: str = Query(...),
-    date_from: Optional[str] = Query(None),
-    date_to: Optional[str] = Query(None),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
+def build_ds_scb_status_payload(
+    db: Session,
+    plant_id: str,
+    date_from: Optional[str],
+    date_to: Optional[str],
+) -> dict:
     """
     Returns the latest fault state per SCB for the given date range.
     Used by the main Fault Diagnostics page for the active-faults table,
@@ -757,6 +793,52 @@ def get_ds_scb_status(
 
     energy_available, energy_note = _voltage_meta(db, plant_id, date_from, date_to)
     return {"data": data, "energy_available": energy_available, "energy_note": energy_note}
+
+
+@router.get("/ds-scb-status")
+def get_ds_scb_status(
+    plant_id: str = Query(...),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Latest fault state per SCB. Uses `ds_status_snapshot` whenever possible so
+    the Fault Diagnostics first paint does not scan millions of rows.
+    """
+    t0 = time.perf_counter()
+    key_from, key_to = date_from or "", date_to or ""
+    if snapshot_read_only_enabled():
+        got = load_ds_status_snapshot_any(db, plant_id, key_from, key_to)
+        if got is None:
+            raise HTTPException(503, detail=SNAPSHOT_READ_ONLY_HTTP_DETAIL)
+        payload, fresh = got
+        if fresh:
+            record_snapshot("ds_status", True)
+            record_compute_ms("ds_status_http", (time.perf_counter() - t0) * 1000.0, f"hit ro plant={plant_id}")
+            return payload
+        if snapshot_allow_stale():
+            record_snapshot("ds_status", True)
+            record_compute_ms("ds_status_http", (time.perf_counter() - t0) * 1000.0, f"stale ro plant={plant_id}")
+            return attach_snapshot_stale_meta(payload)
+        raise HTTPException(503, detail=SNAPSHOT_STALE_HTTP_DETAIL)
+
+    hit = get_ds_status_snapshot(db, plant_id, key_from, key_to)
+    if hit is not None:
+        record_snapshot("ds_status", True)
+        record_compute_ms("ds_status_http", (time.perf_counter() - t0) * 1000.0, f"hit plant={plant_id}")
+        return hit
+
+    record_snapshot("ds_status", False)
+    out = build_ds_scb_status_payload(db, plant_id, date_from, date_to)
+    wdb = SessionLocal()
+    try:
+        save_ds_status_snapshot(wdb, plant_id, key_from, key_to, out)
+    finally:
+        wdb.close()
+    record_compute_ms("ds_status_http", (time.perf_counter() - t0) * 1000.0, f"miss plant={plant_id}")
+    return out
 
 
 @router.get("/ds-timeline")
@@ -1473,9 +1555,24 @@ def get_unified_fault_feed(
     db: Session = Depends(get_read_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Single round-trip overview: aggregate tiles + normalized fault rows for the unified table."""
+    """Single round-trip overview: aggregate tiles + normalized fault rows for the unified table.
+    If SOLAR_SNAPSHOT_READ_ONLY=1, never runs heavy compute; 503 or stale per SOLAR_SNAPSHOT_ALLOW_STALE."""
     t0 = time.perf_counter()
     _from, _to = _fault_date_range(date_from, date_to)
+    if snapshot_read_only_enabled():
+        got = load_unified_fault_snapshot_any(db, plant_id, _from, _to)
+        if got is None:
+            raise HTTPException(503, detail=SNAPSHOT_READ_ONLY_HTTP_DETAIL)
+        payload, fresh = got
+        if fresh:
+            record_snapshot("unified_feed", True)
+            record_compute_ms("unified_feed_http", (time.perf_counter() - t0) * 1000.0, f"hit ro plant={plant_id}")
+            return payload
+        if snapshot_allow_stale():
+            record_snapshot("unified_feed", True)
+            record_compute_ms("unified_feed_http", (time.perf_counter() - t0) * 1000.0, f"stale ro plant={plant_id}")
+            return attach_snapshot_stale_meta(payload)
+        raise HTTPException(503, detail=SNAPSHOT_STALE_HTTP_DETAIL)
     cached = get_unified_fault_snapshot(db, plant_id, _from, _to)
     if cached is not None:
         record_snapshot("unified_feed", True)
@@ -1486,6 +1583,7 @@ def get_unified_fault_feed(
     wdb = SessionLocal()
     try:
         save_unified_fault_snapshot(wdb, plant_id, _from, _to, out)
+        upsert_unified_feed_category_totals_from_payload(wdb, plant_id, _from, _to, out)
     finally:
         wdb.close()
     record_compute_ms("unified_feed_http", (time.perf_counter() - t0) * 1000.0, f"miss plant={plant_id}")

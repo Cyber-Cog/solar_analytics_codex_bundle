@@ -17,7 +17,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-from database import get_db, get_read_db
+from database import get_db, get_read_db, SessionLocal, ReadSessionLocal
 from db_perf import choose_data_table
 from models import Plant, User, EquipmentSpec
 from schemas import (
@@ -427,6 +427,62 @@ def _inverter_performance_table(
     return out
 
 
+def finalize_inverter_rows(
+    db: Session,
+    plant_id: str,
+    raw_rows: List[Dict[str, Any]],
+    date_from: str,
+    date_to: str,
+) -> List[Dict[str, Any]]:
+    """
+    Map MV `sql_mv_inverter_performance` row dicts to the same structure as
+    _inverter_performance_table (used by /inverter-performance and /bundle).
+    """
+    table = choose_data_table(db, plant_id, date_from, date_to)
+    f_lo = f"{date_from} 00:00:00"
+    t_hi = f"{date_to} 23:59:59"
+    days = _range_days_inclusive(date_from, date_to)
+    insolation_kwh_m2 = _wms_tilt_insolation_kwh_m2(db, table, plant_id, f_lo, t_hi)
+    spec_dc_cap, _ = _inverter_dc_maps(db, plant_id)
+    out: List[Dict[str, Any]] = []
+    for r in raw_rows:
+        dcp = r.get("dc_power")
+        acp = r.get("ac_power")
+        e_kwh = r.get("energy_kwh")
+        eid = r.get("inverter_id")
+        eff = None
+        if dcp is not None and acp is not None and float(dcp) > 0:
+            eff = round((float(acp) / float(dcp)) * 100, 1)
+        dc_cap = r.get("dc_capacity_kw")
+        if dc_cap is None and eid is not None:
+            dc_cap = spec_dc_cap.get(eid)
+        yld, pr_pct, plf_pct = None, None, None
+        if e_kwh is not None and dc_cap is not None and float(dc_cap) > 0:
+            e = float(e_kwh)
+            c = float(dc_cap)
+            raw_yld = e / c
+            yld = round(raw_yld, 2)
+            if insolation_kwh_m2 and insolation_kwh_m2 > 0:
+                pr_pct = round((raw_yld / insolation_kwh_m2) * 100, 1)
+            denom = c * 24 * days
+            if denom > 0:
+                plf_pct = round((e / denom) * 100, 1)
+        out.append(
+            {
+                "inverter_id": eid,
+                "dc_power_kw": round(float(dcp), 2) if dcp is not None else None,
+                "ac_power_kw": round(float(acp), 2) if acp is not None else None,
+                "generation_kwh": round(float(e_kwh), 2) if e_kwh is not None else None,
+                "dc_capacity_kwp": round(float(dc_cap), 2) if dc_cap is not None else None,
+                "efficiency_pct": eff,
+                "yield_kwh_kwp": yld,
+                "pr_pct": pr_pct,
+                "plf_pct": plf_pct,
+            }
+        )
+    return out
+
+
 def _average_pr_from_inverter_table(inv: List[Dict[str, Any]]) -> Optional[float]:
     vals = [r["pr_pct"] for r in inv if r.get("pr_pct") is not None]
     if not vals:
@@ -721,7 +777,6 @@ def inverter_performance(
                 "energy_kwh": r.energy_kwh,
                 "dc_capacity_kw": r.dc_cap_kw
             })
-        from dashboard_helpers import finalize_inverter_rows
         rows = finalize_inverter_rows(db, plant_id, rows, _from, _to)
         logger.info(f"Dashboard /inverter-performance hit Materialized View in {time.time() - start_time:.4f}s")
     else:
@@ -815,26 +870,93 @@ def loss_waterfall(
     return result
 
 
+def _fetch_target_generation_payload(plant_id: str, date_from: str, date_to: str) -> Any:
+    """Load expected/actual snapshot; uses write pool and fault_cache (same as bundle worker)."""
+    s = None
+    try:
+        s = SessionLocal()
+        lg_key = cache_key_loss_gen_snapshot(plant_id, date_from, date_to)
+        tg = fault_cache_get(s, lg_key, TTL_LOSS_GEN_SNAPSHOT_MIN)
+        # Stale error snapshots were cached before we skipped caching — treat as miss.
+        if tg and tg.get("compute_error"):
+            tg = None
+        if tg is None:
+            from routers.loss_analysis import compute_plant_expected_actual_mwh_for_range
+
+            tg = compute_plant_expected_actual_mwh_for_range(s, plant_id, date_from, date_to)
+            if not (isinstance(tg, dict) and tg.get("compute_error")):
+                fault_cache_set(s, lg_key, tg)
+        return tg
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("_fetch_target_generation_payload plant_id=%s", plant_id)
+        msg = str(exc)[:240] if str(exc) else "Could not load expected vs actual for this range."
+        return {
+            "expected_mwh": None,
+            "actual_mwh": None,
+            "insolation_kwh_m2": None,
+            "plant_dc_kwp": None,
+            "compute_error": msg,
+        }
+    finally:
+        if s is not None:
+            s.close()
+
+
 # ── Bundle (single request + cache) ───────────────────────────────────────────
+@router.get("/target-generation")
+def dashboard_target_generation(
+    plant_id: str = Query(...),
+    date_from: str = Query(default=None),
+    date_to: str = Query(default=None),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Expected vs actual (target gen) for dashboard only — use after /bundle?include_target_generation=0
+    for faster first paint. Same payload the full bundle would embed under `target_generation`.
+    """
+    _from, _to = _default_range(date_from, date_to)
+    return _fetch_target_generation_payload(plant_id, _from, _to)
+
+
 @router.get("/bundle")
 def dashboard_bundle(
     plant_id: str  = Query(...),
     date_from: str = Query(default=None),
     date_to: str   = Query(default=None),
+    include_target_generation: bool = Query(
+        default=True,
+        description="If false, omits target_generation in response (faster; call /target-generation separately).",
+    ),
     db: Session    = Depends(get_read_db),
     current_user: User = Depends(get_current_user),
 ):
     """
     Return station, kpis, wms, energy, inverter_performance, power_vs_gti in one response.
-    Cached 3 min per (plant_id, date range) for much faster repeat loads.
+    Cached per (plant_id, date range). Lite variant (no target gen) uses a separate cache key.
     """
     _from, _to = _default_range(date_from, date_to)
-    cached = cache_get("bundle_v8", plant_id, _from, _to)
+    cache_prefix = "bundle_v9" if include_target_generation else "bundle_v9_lite"
+    cached = cache_get(cache_prefix, plant_id, _from, _to)
     if cached is not None:
+        logger.info(
+            "dashboard bundle plant=%s range=%s..%s cache=hit key=%s itg=%s",
+            plant_id,
+            _from,
+            _to,
+            cache_prefix,
+            include_target_generation,
+        )
         return cached
 
+    _bundle_t0 = time.perf_counter()
     f_ts, t_ts = f"{_from} 00:00:00", f"{_to} 23:59:59"
     table = choose_data_table(db, plant_id, _from, _to)
+    mv_inv = (
+        db.execute(
+            text("SELECT 1 FROM pg_matviews WHERE matviewname = 'mv_inverter_power_1min'")
+        ).fetchone()
+        is not None
+    )
     plant = db.query(Plant).filter(Plant.plant_id == plant_id).first()
     cap_kw = (plant.capacity_mwp * 1000) if (plant and plant.capacity_mwp) else None
     spec_dc_map, arch_dc_map = _inverter_dc_maps(db, plant_id)
@@ -857,75 +979,104 @@ def dashboard_bundle(
 
     # ── Parallelize heavy queries ────────────────────────────────────────────
     # Each task gets its own DB session so queries run truly concurrently.
+    # Read-only work uses ReadSessionLocal (read pool); target_generation may
+    # write fault_cache rows and uses SessionLocal in _fetch_target_generation_payload.
     from concurrent.futures import ThreadPoolExecutor
-    from database import SessionLocal
 
     params = {"plant_id": plant_id, "f": f_ts, "t": t_ts}
 
     def _q_inv_table():
-        s = SessionLocal()
+        s = ReadSessionLocal()
         try:
+            if mv_inv:
+                isql = text(sql_mv_inverter_performance(plant_id))
+                rows_raw = s.execute(
+                    isql, {"plant_id": plant_id, "f": f_ts, "t": t_ts}
+                ).fetchall()
+                raw_dicts: List[Dict[str, Any]] = []
+                for r in rows_raw:
+                    raw_dicts.append(
+                        {
+                            "inverter_id": r.equipment_id,
+                            "dc_power": r.dc_power,
+                            "ac_power": r.ac_power,
+                            "energy_kwh": r.energy_kwh,
+                            "dc_capacity_kw": r.dc_cap_kw,
+                        }
+                    )
+                return finalize_inverter_rows(s, plant_id, raw_dicts, _from, _to)
             return _inverter_performance_table(s, table, plant_id, f_ts, t_ts, _from, _to)
         finally:
             s.close()
 
     def _q_ac_totals():
-        s = SessionLocal()
+        s = ReadSessionLocal()
         try:
             return s.execute(text(sql_plant_ac_totals(table)), params).fetchone()
         finally:
             s.close()
 
     def _q_insolation():
-        s = SessionLocal()
+        s = ReadSessionLocal()
         try:
             return _wms_tilt_insolation_kwh_m2(s, table, plant_id, f_ts, t_ts)
         finally:
             s.close()
 
     def _q_wms():
-        s = SessionLocal()
+        s = ReadSessionLocal()
         try:
             return _wms_kpis_payload(s, table, plant_id, f_ts, t_ts)
         finally:
             s.close()
 
     def _q_energy():
-        s = SessionLocal()
+        s = ReadSessionLocal()
         try:
-            return s.execute(text(sql_plant_ac_daily_energy(table)), {"plant_id": plant_id, "from_ts": f_ts, "to_ts": t_ts}).fetchall()
+            if mv_inv:
+                esql = text(sql_mv_plant_ac_daily_energy())
+                return s.execute(
+                    esql, {"plant_id": plant_id, "from_ts": f_ts, "to_ts": t_ts}
+                ).fetchall()
+            return s.execute(
+                text(sql_plant_ac_daily_energy(table)),
+                {"plant_id": plant_id, "from_ts": f_ts, "to_ts": t_ts},
+            ).fetchall()
         finally:
             s.close()
 
     def _q_pvg():
-        s = SessionLocal()
+        s = ReadSessionLocal()
         try:
             pvg_lim = _power_vs_gti_row_limit(_from, _to)
+            if mv_inv:
+                psql = text(sql_mv_power_vs_gti())
+                return s.execute(
+                    psql,
+                    {
+                        "plant_id": plant_id,
+                        "f": f_ts,
+                        "t": t_ts,
+                        "limit": pvg_lim,
+                    },
+                ).fetchall()
             return s.execute(text(_sql_power_vs_gti(table, pvg_lim)), params).fetchall()
         finally:
             s.close()
 
     def _q_target_gen():
-        s = SessionLocal()
-        try:
-            lg_key = cache_key_loss_gen_snapshot(plant_id, _from, _to)
-            tg = fault_cache_get(s, lg_key, TTL_LOSS_GEN_SNAPSHOT_MIN)
-            if tg is None:
-                from routers.loss_analysis import compute_plant_expected_actual_mwh_for_range
-                tg = compute_plant_expected_actual_mwh_for_range(s, plant_id, _from, _to)
-                fault_cache_set(s, lg_key, tg)
-            return tg
-        finally:
-            s.close()
+        return _fetch_target_generation_payload(plant_id, _from, _to)
 
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    # Six read pools + optional target_gen (7) — pool size 6 matches prior behavior when itg on.
+    _workers = 6 if include_target_generation else 5
+    with ThreadPoolExecutor(max_workers=_workers) as pool:
         fut_inv = pool.submit(_q_inv_table)
         fut_ac  = pool.submit(_q_ac_totals)
         fut_ins = pool.submit(_q_insolation)
         fut_wms = pool.submit(_q_wms)
         fut_en  = pool.submit(_q_energy)
         fut_pvg = pool.submit(_q_pvg)
-        fut_tg  = pool.submit(_q_target_gen)
+        fut_tg = pool.submit(_q_target_gen) if include_target_generation else None
 
         inv_table = fut_inv.result()
         ac        = fut_ac.result()
@@ -933,7 +1084,8 @@ def dashboard_bundle(
         wms       = fut_wms.result()
         en_rows   = fut_en.result()
         pvg_rows  = fut_pvg.result()
-        target_generation = fut_tg.result()
+        target_generation = fut_tg.result() if fut_tg is not None else None
+    _parallel_ms = (time.perf_counter() - _bundle_t0) * 1000.0
 
     # ── Assemble KPIs (same logic, now using parallel results) ─────────────
     insolation_kwh_m2 = round(_ins_b, 2) if _ins_b > 0 else None
@@ -984,7 +1136,18 @@ def dashboard_bundle(
         "power_vs_gti": power_gti,
         "target_generation": target_generation,
     }
-    cache_set("bundle_v8", plant_id, _from, _to, out)
+    cache_set(cache_prefix, plant_id, _from, _to, out)
+    _total_ms = (time.perf_counter() - _bundle_t0) * 1000.0
+    logger.info(
+        "dashboard bundle plant=%s range=%s..%s total_ms=%.1f parallel_ms=%.1f cache=miss itg=%s pvg_rows=%d",
+        plant_id,
+        _from,
+        _to,
+        _total_ms,
+        _parallel_ms,
+        include_target_generation,
+        len(power_gti),
+    )
     return out
 
 
@@ -1002,8 +1165,8 @@ def _power_vs_gti_row_limit(date_from: str, date_to: str) -> int:
         days = max(1, (d1 - d0).days + 1)
     except Exception:
         days = 7
-    # ~1-min data with moderate headroom, but avoid very large payloads on short ranges.
-    return min(120_000, max(2_000, days * 1_700))
+    # Tuned for UI chart density + faster DB/JSON; long ranges cap lower than v1
+    return min(50_000, max(2_000, days * 1_200))
 
 
 def _as_json_str(v: Any) -> Optional[str]:

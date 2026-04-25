@@ -1,5 +1,5 @@
 """
-DB-backed cache for expensive raw-data fault tab payloads (PL / IS / GB).
+DB-backed cache for expensive raw-data fault tab payloads.
 Complements in-memory dashboard_cache (180s TTL); rows persist across process restarts
 until raw upload calls clear_snapshots_for_plant.
 """
@@ -7,29 +7,33 @@ until raw upload calls clear_snapshots_for_plant.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from sqlalchemy.orm import Session
 
-from models import FaultRuntimeSnapshot
+from models import FaultRuntimeSnapshot, RawDataStats
 
 KIND_PL_PAGE = "pl_page"
 KIND_IS_TAB = "is_tab"
 KIND_GB_TAB = "gb_tab"
+KIND_COMM_TAB = "comm_tab"
+KIND_CD_TAB = "cd_tab"
 
-# Longer than dashboard_cache TTL so a cold API process can still skip pandas once.
-SNAPSHOT_MAX_AGE = timedelta(minutes=10)
 
-
-def _age_ok(updated_at: Optional[datetime]) -> bool:
+def _fresh_vs_raw_stats(db: Session, plant_id: str, updated_at: Optional[datetime]) -> bool:
     if updated_at is None:
         return False
-    now = datetime.now(timezone.utc)
-    ua = updated_at
-    if ua.tzinfo is None:
-        ua = ua.replace(tzinfo=timezone.utc)
-    return (now - ua) <= SNAPSHOT_MAX_AGE
+    stats = db.query(RawDataStats).filter(RawDataStats.plant_id == plant_id).first()
+    if not stats or not stats.updated_at:
+        return False
+    snap_ts = updated_at
+    anchor = stats.updated_at
+    if snap_ts.tzinfo is not None:
+        snap_ts = snap_ts.replace(tzinfo=None)
+    if anchor.tzinfo is not None:
+        anchor = anchor.replace(tzinfo=None)
+    return snap_ts >= anchor
 
 
 def try_snapshot_payload(
@@ -45,7 +49,7 @@ def try_snapshot_payload(
         )
         .first()
     )
-    if not row or not _age_ok(row.updated_at):
+    if not row or not _fresh_vs_raw_stats(db, plant_id, row.updated_at):
         return None
     try:
         return json.loads(row.payload_json)

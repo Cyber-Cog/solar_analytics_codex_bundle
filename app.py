@@ -20,6 +20,8 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 os.environ.setdefault("SOLAR_SERVERLESS", "1")
+os.environ.setdefault("SOLAR_SNAPSHOT_READ_ONLY", "1")
+os.environ.setdefault("SOLAR_SNAPSHOT_ALLOW_STALE", "1")
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 # Vercel's Python runtime scans for a top-level app/application/handler symbol.

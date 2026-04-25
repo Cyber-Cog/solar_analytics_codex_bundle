@@ -10,7 +10,7 @@ function _fmtMwh(v) {
   return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
-window.DashboardTargetGeneration = ({ plantId, dateFrom, dateTo, targetGeneration }) => {
+window.DashboardTargetGeneration = ({ plantId, dateFrom, dateTo, targetGeneration, apiTargetGenPending }) => {
   const { Card, Spinner } = window;
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState('');
@@ -19,6 +19,8 @@ window.DashboardTargetGeneration = ({ plantId, dateFrom, dateTo, targetGeneratio
 
   const bundleExp = targetGeneration != null ? targetGeneration.expected_mwh : undefined;
   const bundleAct = targetGeneration != null ? targetGeneration.actual_mwh : undefined;
+  const tgApiErr = targetGeneration && (targetGeneration.compute_error || targetGeneration.error);
+  const tgPending = Boolean(apiTargetGenPending);
 
   useEffect(() => {
     if (!plantId || !dateFrom || !dateTo) {
@@ -26,11 +28,24 @@ window.DashboardTargetGeneration = ({ plantId, dateFrom, dateTo, targetGeneratio
       setActualMwh(null);
       return;
     }
+    if (tgApiErr) {
+      setErr(String(tgApiErr));
+      setExpectedMwh(null);
+      setActualMwh(null);
+      setLoading(false);
+      return;
+    }
     if (bundleExp != null && bundleAct != null) {
       setExpectedMwh(Number(bundleExp));
       setActualMwh(Number(bundleAct));
       setErr('');
       setLoading(false);
+      return;
+    }
+    // Wait for /target-generation to finish; do not fire LossAnalysis.bridge in parallel (duplicate load).
+    if (tgPending) {
+      setLoading(true);
+      setErr('');
       return;
     }
 
@@ -65,7 +80,7 @@ window.DashboardTargetGeneration = ({ plantId, dateFrom, dateTo, targetGeneratio
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [plantId, dateFrom, dateTo, bundleExp, bundleAct]);
+  }, [plantId, dateFrom, dateTo, bundleExp, bundleAct, tgPending, tgApiErr]);
 
   const chartData = useMemo(() => {
     const e = expectedMwh != null && !Number.isNaN(expectedMwh) ? expectedMwh : null;

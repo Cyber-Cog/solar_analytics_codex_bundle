@@ -5,16 +5,18 @@ Analytics Lab API — equipment list, timeseries data, availability.
 """
 
 import logging
+import os
 
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func
-from typing import List, Optional, Set
+from typing import Any, List, Optional, Set
 from datetime import date, timedelta
 
 from database import get_read_db
 from db_perf import choose_data_table
 from models import User, PlantEquipment, PlantArchitecture, EquipmentSpec
+from routers import analytics_timescale
 from schemas import EquipmentListResponse, TimeseriesPoint, TimeseriesResponse
 from auth.routes import get_current_user
 
@@ -34,6 +36,64 @@ _NORMALIZE_MIN_IRR_W_M2 = 50.0
 
 # Analytics Lab /signals: avoid full-table DISTINCT on huge plants (25s statement_timeout).
 _CHUNK_EQ = 72
+_TS_CACHE_SEC = int(os.environ.get("SOLAR_ANALYTICS_TS_CACHE_SEC", "600"))
+_MAX_SCB_ROLLUP = int(os.environ.get("SOLAR_ANALYTICS_SCB_ROLLUP_MAX_SCB", "8000"))
+
+
+def _dc_hierarchy_branch_sql(id_placeholders: str, sig_placeholders: str) -> str:
+    """Second branch: minute buckets from dc_hierarchy_derived (precedence 2)."""
+    return f"""
+        SELECT DATE_TRUNC('minute', CAST("timestamp" AS TIMESTAMP)) AS timestamp,
+               equipment_id, signal, AVG(value) AS value, 2 AS precedence
+        FROM dc_hierarchy_derived
+        WHERE plant_id     = :plant_id
+          AND equipment_id IN ({id_placeholders})
+          AND signal       IN ({sig_placeholders})
+          AND "timestamp" BETWEEN :from_ts AND :to_ts
+        GROUP BY 1, 2, 3
+    """
+
+
+def _scb_rollup_select_sql(table: str, id_placeholders: str, sig_placeholders: str) -> str:
+    """SCB dc_current roll-up to inverter (precedence 3)."""
+    return f"""
+        SELECT DATE_TRUNC('minute', CAST(r."timestamp" AS TIMESTAMP)) AS timestamp,
+               map.inverter_id AS equipment_id,
+               r.signal,
+               CASE WHEN r.signal LIKE '%voltage%' THEN AVG(r.value) ELSE SUM(r.value) END AS value,
+               3 AS precedence
+        FROM {table} r
+        JOIN (
+            SELECT DISTINCT plant_id, inverter_id, scb_id
+            FROM plant_architecture
+            WHERE plant_id = :plant_id
+              AND inverter_id IN ({id_placeholders})
+              AND scb_id IS NOT NULL
+        ) map ON r.equipment_id = map.scb_id
+        WHERE r.plant_id = :plant_id
+          AND r.signal IN ({sig_placeholders})
+          AND r.signal = 'dc_current'
+          AND r."timestamp" BETWEEN :from_ts AND :to_ts
+        GROUP BY 1, 2, 3
+    """
+
+
+def _count_scbs_for_inverters(db: Session, plant_id: str, inverter_ids: List[str]) -> int:
+    """How many distinct SCBs are mapped under the given inverter ids (SCB roll-up cost guard)."""
+    clean = [str(i).strip().replace("'", "''") for i in inverter_ids if str(i).strip()]
+    if not clean:
+        return 0
+    id_placeholders = ",".join(f"'{i}'" for i in clean)
+    try:
+        q = text(
+            f"SELECT count(*)::int FROM ("
+            f"SELECT DISTINCT scb_id FROM plant_architecture "
+            f"WHERE plant_id = :plant_id AND inverter_id IN ({id_placeholders}) "
+            f"AND scb_id IS NOT NULL) x"
+        )
+        return int(db.execute(q, {"plant_id": plant_id}).scalar() or 0)
+    except Exception:
+        return 10**9
 
 
 def _distinct_signals_safe(db: Session, sql: str, params: dict, tag: str) -> Set[str]:
@@ -270,10 +330,11 @@ def get_timeseries(
     _from, _to = _default_range(date_from, date_to)
 
     cache_key = (
-        f"analytics:timeseries:v2:{plant_id}:{level}:{_from}:{_to}:"
-        f"{','.join(ids)}:{','.join(sigs)}:{int(normalize)}:{dc_source}"
+        f"analytics:timeseries:v3:{plant_id}:{level}:{_from}:{_to}:"
+        f"{','.join(ids)}:{','.join(sigs)}:{int(normalize)}:{dc_source}:"
+        f"{int(analytics_timescale.analytics_use_cagg())}"
     )
-    cached = get_any(cache_key, 180)
+    cached = get_any(cache_key, _TS_CACHE_SEC)
     if cached is not None:
         if isinstance(cached, dict):
             return TimeseriesResponse(**cached)
@@ -292,60 +353,67 @@ def get_timeseries(
             query_signals.append(sig)
     query_signals = list(dict.fromkeys(query_signals))
 
-    id_placeholders  = ",".join(f"'{i}'" for i in ids)
+    id_placeholders = ",".join(f"'{i}'" for i in ids)
     sig_placeholders = ",".join(f"'{s}'" for s in query_signals)
 
-    # The SCB roll-up UNION branch must ONLY run when the user selected INVERTER level.
-    # When SCB/string level is selected the ids are already SCB/string IDs — running the
-    # JOIN would incorrectly use them as inverter_ids and produce wrong data or errors.
     is_inverter_level = (level or "inverter").strip().lower() == "inverter"
-
-    scb_rollup_union = ""
+    has_scb_rollup = False
     if is_inverter_level:
-        scb_rollup_union = f"""
-        UNION ALL
-        SELECT DATE_TRUNC('minute', CAST(r.timestamp AS TIMESTAMP)) AS timestamp,
-               map.inverter_id AS equipment_id,
-               r.signal,
-               CASE WHEN r.signal LIKE '%voltage%' THEN AVG(r.value) ELSE SUM(r.value) END AS value,
-               3 AS precedence
-        FROM {table} r
-        JOIN (
-            SELECT DISTINCT plant_id, inverter_id, scb_id
-            FROM plant_architecture
-            WHERE plant_id = :plant_id
-              AND inverter_id IN ({id_placeholders})
-              AND scb_id IS NOT NULL
-        ) map ON r.equipment_id = map.scb_id
-        WHERE r.plant_id = :plant_id
-          AND r.signal IN ({sig_placeholders})
-          AND r.signal = 'dc_current'
-          AND r.timestamp BETWEEN :from_ts AND :to_ts
-        GROUP BY 1, 2, 3"""
+        n_scb = _count_scbs_for_inverters(db, plant_id, ids)
+        if n_scb > _MAX_SCB_ROLLUP:
+            log.warning(
+                "analytics.timeseries SCB roll-up skipped plant=%s inverter_ids=%s scb_count=%s max=%s",
+                plant_id,
+                len(ids),
+                n_scb,
+                _MAX_SCB_ROLLUP,
+            )
+        else:
+            has_scb_rollup = True
 
-    sql = text(f"""
-        SELECT DATE_TRUNC('minute', CAST(timestamp AS TIMESTAMP)) AS timestamp,
-               equipment_id, signal, AVG(value) AS value, 1 AS precedence
+    from_ts = f"{_from} 00:00:00"
+    to_ts = f"{_to} 23:59:59"
+    params = {"plant_id": plant_id, "from_ts": from_ts, "to_ts": to_ts}
+
+    crows: Optional[List[Any]] = None
+    if table == "raw_data_generic":
+        crows = analytics_timescale.fetch_cagg_minute_rows(
+            db, plant_id, ids, query_signals, from_ts, to_ts
+        )
+
+    rows: List[Any]
+    if crows is not None:
+        rows = list(crows)
+        dh_sql = text(_dc_hierarchy_branch_sql(id_placeholders, sig_placeholders))
+        rows.extend(db.execute(dh_sql, params).fetchall())
+        if has_scb_rollup:
+            rollup_sql = text(_scb_rollup_select_sql(table, id_placeholders, sig_placeholders))
+            rows.extend(db.execute(rollup_sql, params).fetchall())
+    else:
+        first_prec = "2" if table == "dc_hierarchy_derived" else "1"
+        dh_part = ""
+        if table == "raw_data_generic":
+            dh_part = " UNION ALL " + _dc_hierarchy_branch_sql(id_placeholders, sig_placeholders).strip()
+        rollup_part = ""
+        if has_scb_rollup:
+            rollup_part = " UNION ALL " + _scb_rollup_select_sql(table, id_placeholders, sig_placeholders).strip()
+        sql = text(
+            f"""
+        SELECT DATE_TRUNC('minute', CAST("timestamp" AS TIMESTAMP)) AS timestamp,
+               equipment_id, signal, AVG(value) AS value, {first_prec} AS precedence
         FROM {table}
         WHERE plant_id = :plant_id
           AND equipment_id IN ({id_placeholders})
           AND signal       IN ({sig_placeholders})
-          AND timestamp BETWEEN :from_ts AND :to_ts
+          AND "timestamp" BETWEEN :from_ts AND :to_ts
         GROUP BY 1, 2, 3
-        UNION ALL
-        SELECT DATE_TRUNC('minute', CAST(timestamp AS TIMESTAMP)) AS timestamp,
-               equipment_id, signal, AVG(value) AS value, 2 AS precedence
-        FROM dc_hierarchy_derived
-        WHERE plant_id     = :plant_id
-          AND equipment_id IN ({id_placeholders})
-          AND signal       IN ({sig_placeholders})
-          AND timestamp BETWEEN :from_ts AND :to_ts
-        GROUP BY 1, 2, 3
-        {scb_rollup_union}
+        {dh_part}
+        {rollup_part}
         ORDER BY timestamp, equipment_id, precedence
         LIMIT 100000
-    """)
-    rows = db.execute(sql, {"plant_id": plant_id, "from_ts": f"{_from} 00:00:00", "to_ts": f"{_to} 23:59:59"}).fetchall()
+        """
+        )
+        rows = db.execute(sql, params).fetchall()
 
     def _canonical_signal(sig: str) -> str:
         return "gti" if sig == "irradiance" else sig
@@ -429,7 +497,7 @@ def get_timeseries(
         "availability_pct": avail,
         "date_range": {"from": _from, "to": _to},
     }
-    set_any(cache_key, payload, 180)
+    set_any(cache_key, payload, _TS_CACHE_SEC)
     return TimeseriesResponse(**payload)
 
 

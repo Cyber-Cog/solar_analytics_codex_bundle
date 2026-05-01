@@ -1089,7 +1089,7 @@ window.MetadataPage = ({ plantId }) => {
     { key:'dc_capacity_kwp', label:'DC Cap (kWp)', csvValue:(r)=>fmtNull(r.dc_capacity_kwp) },
     { key:'rated_efficiency', label:'Rated Eff %', csvValue:(r)=>fmtNull(r.rated_efficiency) },
     { key:'imp', label:'Imp (A)', csvValue:(r)=>fmtNull(r.imp) },
-    { key:'vmp', label:'Vmp (V)', csvValue:(r)=>fmtNull(r.vmp) },
+{ key:'vmp', label:'Vmp (V)', csvValue:(r)=>fmtNull(r.vmp) },
     { key:'impp', label:'Impp (A)', csvValue:(r)=>fmtNull(r.impp) },
     { key:'vmpp', label:'Vmpp (V)', csvValue:(r)=>fmtNull(r.vmpp) },
     { key:'pmax', label:'Pmax (W)', csvValue:(r)=>fmtNull(r.pmax) },
@@ -1143,6 +1143,9 @@ window.MetadataPage = ({ plantId }) => {
     }),
   );
 
+  const [computingFaults, setComputingFaults] = useState(false);
+  const [computeMsg, setComputeMsg] = useState(null);
+
   return h('div', null,
     // ── Tabs ──────────────────────────────────────────────────────────────
     h('div', { className:'metadata-tabs' },
@@ -1151,20 +1154,48 @@ window.MetadataPage = ({ plantId }) => {
       ),
     ),
 
-    // ── Action bar: Download Template + Upload + Refresh ───────────────────
+    // ── Action bar: tab-specific template downloads + Upload + Refresh ───────
     h('div', { style:{display:'flex', gap:10, marginBottom:16, alignItems:'center', flexWrap:'wrap'} },
-      h('button', {
+      tab === 'architecture' && h('button', {
         className:'btn btn-outline',
-        onClick:()=>downloadTemplate(
-          tab==='architecture' ? '/api/metadata/template/architecture' : 
-          tab==='equipment' ? '/api/metadata/template/equipment' : '/api/metadata/template/raw-data',
-          tab==='architecture' ? 'architecture_template.xlsx' : 
-          tab==='equipment' ? 'equipment_template.xlsx' : 'raw_data_template.xlsx',
-        ),
-      }, 'Download Template'),
+        onClick:()=>downloadTemplate('/api/metadata/template/architecture', 'architecture_template.xlsx'),
+      }, '\u2193 Download Template'),
+      tab === 'equipment' && h('button', {
+        className:'btn btn-outline',
+        onClick:()=>downloadTemplate('/api/metadata/template/equipment', 'equipment_specs_template.xlsx'),
+      }, '\u2193 Download Template'),
+      tab === 'rawdata' && h('button', {
+        className:'btn btn-outline',
+        title:'Universal flat format: timestamp, equipment_level, equipment_id, signal, value',
+        onClick:()=>downloadTemplate('/api/metadata/template/raw-data', 'raw_data_generic_template.xlsx'),
+      }, '\u2193 Generic Template'),
+      tab === 'rawdata' && plantId && h('button', {
+        className:'btn btn-outline',
+        style:{ borderColor:'#22c55e', color:'#22c55e' },
+        disabled: computingFaults,
+        title:'Re-run fault detection on already-uploaded raw data. Use after uploading architecture.',
+        onClick: async () => {
+          setComputingFaults(true); setComputeMsg(null);
+          try {
+            const r = await window.SolarAPI.Metadata.runFaultComputation(plantId);
+            setComputeMsg({ type: r.success ? 'success' : 'warn', text: r.message });
+          } catch(e) {
+            setComputeMsg({ type: 'error', text: e.message });
+          } finally { setComputingFaults(false); }
+        },
+      }, computingFaults ? '\u23F3 Computing\u2026' : '\u26A1 Compute Faults Now'),
       uploadInput(`upload-${tab}`),
       h('button', { className:'btn btn-outline', onClick: handleMetadataRefresh, disabled:loading }, loading ? h(Spinner) : 'Refresh'),
     ),
+
+    computeMsg && h('div', {
+      style:{
+        padding:'10px 14px', borderRadius:8, marginBottom:10, fontSize:12, fontWeight:500,
+        background: computeMsg.type==='success' ? 'rgba(34,197,94,0.10)' : 'rgba(239,68,68,0.10)',
+        border: `1px solid ${computeMsg.type==='success' ? '#22c55e' : '#ef4444'}`,
+        color: computeMsg.type==='success' ? '#15803d' : '#dc2626',
+      },
+    }, computeMsg.text),
 
     // ── Upload status banner ────────────────────────────────────────────────
     uploadMsg && h('div', {

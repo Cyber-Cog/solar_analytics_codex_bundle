@@ -279,6 +279,19 @@ const Metadata = {
   },
   templateArch:      () => `${API_BASE}/api/metadata/template/architecture?token=${getToken()}`,
   templateEquipment: () => `${API_BASE}/api/metadata/template/equipment?token=${getToken()}`,
+  templateRawData:   () => `${API_BASE}/api/metadata/template/raw-data?token=${getToken()}`,
+  uploadGenericRawData: (plantId, file) => {
+    const f = new FormData();
+    f.append('plant_id', plantId);
+    f.append('file', file);
+    return apiFetch('/api/metadata/upload-raw-data-generic', { method: 'POST', body: f });
+  },
+  runFaultComputation: (plantId, dateFrom, dateTo) => {
+    const q = new URLSearchParams({ plant_id: plantId });
+    if (dateFrom) q.set('date_from', dateFrom);
+    if (dateTo) q.set('date_to', dateTo);
+    return apiFetch(`/api/metadata/run-fault-computation?${q.toString()}`, { method: 'POST' });
+  },
 };
 
 // ── Tickets ───────────────────────────────────────────────────────────────────

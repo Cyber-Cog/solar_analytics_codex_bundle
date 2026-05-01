@@ -429,7 +429,10 @@ async def upload_architecture_excel(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Bulk upload plant architecture from Excel."""
+    """Bulk upload plant architecture from Excel.
+    Required columns: plant_id, inverter_id, scb_id, string_id
+    Optional columns: modules_per_string, strings_per_scb, scbs_per_inverter, dc_capacity_kw, spare_flag
+    """
     content = await file.read()
     df = pd.read_excel(io.BytesIO(content), dtype=str)
     df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
@@ -438,17 +441,29 @@ async def upload_architecture_excel(
     if not required.issubset(df.columns):
         raise HTTPException(status_code=400, detail=f"Missing columns: {required - set(df.columns)}")
 
+    def _parse_bool(val) -> bool:
+        if val is None: return False
+        s = str(val).strip().lower()
+        return s in ("true", "1", "yes", "y", "spare", "x")
+
     count = 0
     for _, row in df.iterrows():
+        pid = str(row.get("plant_id", "")).strip()
+        inv = str(row.get("inverter_id", "")).strip()
+        scb = str(row.get("scb_id", "")).strip()
+        sid = str(row.get("string_id", "")).strip()
+        if not pid or not inv or not scb or not sid:
+            continue
         arch = PlantArchitecture(
-            plant_id           = str(row.get("plant_id", "")).strip(),
-            inverter_id        = str(row.get("inverter_id", "")).strip(),
-            scb_id             = str(row.get("scb_id", "")).strip(),
-            string_id          = str(row.get("string_id", "")).strip(),
+            plant_id           = pid,
+            inverter_id        = inv,
+            scb_id             = scb,
+            string_id          = sid,
             modules_per_string = _safe_int(row.get("modules_per_string")),
             strings_per_scb    = _safe_int(row.get("strings_per_scb")),
             scbs_per_inverter  = _safe_int(row.get("scbs_per_inverter")),
             dc_capacity_kw     = _safe_float(row.get("dc_capacity_kw")),
+            spare_flag         = _parse_bool(row.get("spare_flag")),
         )
         db.merge(arch)
         count += 1
@@ -696,57 +711,321 @@ async def upload_raw_data_mapped(
 # ── Excel Template Downloads ──────────────────────────────────────────────────
 @router.get("/template/architecture")
 def download_architecture_template(current_user: User = Depends(get_current_user)):
-    """Download Excel template for plant architecture bulk upload."""
-    df = pd.DataFrame([{
-        "plant_id": "PLANT-WMS-01", "inverter_id": "INV-01",
-        "scb_id": "INV-01-SCB-01", "string_id": "INV-01-SCB-01-STR-01",
-        "modules_per_string": 20, "strings_per_scb": 10,
-        "scbs_per_inverter": 5, "dc_capacity_kw": 4.2,
-    }])
-    return _df_to_excel_response(df, "architecture_template.xlsx")
+    """Download a fully-populated Excel template for plant architecture upload."""
+    buf = io.BytesIO()
+    cols = [
+        "plant_id", "inverter_id", "scb_id", "string_id",
+        "modules_per_string", "strings_per_scb", "scbs_per_inverter",
+        "dc_capacity_kw", "spare_flag",
+    ]
+    desc = [
+        "Your plant ID (must match Plants table)",
+        "Inverter ID  e.g. INV-01",
+        "SCB ID  e.g. INV-01-SCB-01",
+        "String ID  e.g. INV-01-SCB-01-STR-01",
+        "Number of modules per string (integer)",
+        "Number of strings per SCB (integer)",
+        "Number of SCBs per inverter (integer)",
+        "DC capacity of the string/SCB in kW (float)",
+        "TRUE if spare/inactive SCB — excluded from fault analysis",
+    ]
+    example_rows = [
+        ["PLANT-01", "INV-01", "INV-01-SCB-01", "INV-01-SCB-01-STR-01", 20, 10, 5, 4.2, False],
+        ["PLANT-01", "INV-01", "INV-01-SCB-01", "INV-01-SCB-01-STR-02", 20, 10, 5, 4.2, False],
+        ["PLANT-01", "INV-01", "INV-01-SCB-02", "INV-01-SCB-02-STR-01", 20, 10, 5, 4.2, False],
+        ["PLANT-01", "INV-02", "INV-02-SCB-01", "INV-02-SCB-01-STR-01", 20, 10, 5, 4.2, True],
+    ]
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        wb = writer.book
+        ws = wb.add_worksheet("Architecture")
+        # Formats
+        hdr_fmt = wb.add_format({"bold": True, "bg_color": "#1a3a5c", "font_color": "#ffffff", "border": 1, "text_wrap": True})
+        desc_fmt = wb.add_format({"italic": True, "font_color": "#5a7a9a", "bg_color": "#f0f7ff", "text_wrap": True, "border": 1})
+        data_fmt = wb.add_format({"border": 1})
+        bool_fmt = wb.add_format({"border": 1, "align": "center"})
+        ws.set_row(0, 28)
+        ws.set_row(1, 42)
+        col_widths = [18, 14, 22, 30, 20, 18, 20, 18, 14]
+        for ci, (col, d, w) in enumerate(zip(cols, desc, col_widths)):
+            ws.write(0, ci, col, hdr_fmt)
+            ws.write(1, ci, d, desc_fmt)
+            ws.set_column(ci, ci, w)
+        for ri, row_data in enumerate(example_rows):
+            for ci, val in enumerate(row_data):
+                fmt = bool_fmt if isinstance(val, bool) else data_fmt
+                ws.write(ri + 2, ci, val, fmt)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=architecture_template.xlsx"},
+    )
 
 
 @router.get("/template/equipment")
 def download_equipment_template(current_user: User = Depends(get_current_user)):
-    """Download Excel template for equipment specs bulk upload."""
-    df = pd.DataFrame([{
-        "equipment_id": "INV-01", "equipment_type": "inverter",
-        "manufacturer": "SMA", "model": "Sunny Tripower 50",
-        "rated_power": 50.0, "imp": 9.5, "vmp": 555.0, "isc": 9.8, "voc": 650.0,
-    }])
-    return _df_to_excel_response(df, "equipment_template.xlsx")
+    """Download an Excel template with separate Inverter and Module sheets."""
+    buf = io.BytesIO()
+    inv_cols = [
+        "equipment_id", "equipment_type", "manufacturer", "model",
+        "ac_capacity_kw", "dc_capacity_kwp", "rated_power",
+        "rated_efficiency", "target_efficiency",
+        "mppt_voltage_min", "mppt_voltage_max", "voltage_limit",
+        "current_set_point", "imp", "vmp", "isc", "voc",
+        "degradation_loss_pct", "temp_coefficient_per_deg",
+    ]
+    inv_desc = [
+        "Inverter ID  e.g. INV-01", "Must be 'inverter'",
+        "Manufacturer name", "Model name / number",
+        "AC output capacity in kW", "DC input capacity in kWp", "Rated power in kW",
+        "Euro/rated efficiency % (e.g. 98.5)", "Target efficiency % for alerts",
+        "MPPT min voltage (V)", "MPPT max voltage (V)", "Absolute voltage limit (V)",
+        "Current set point (A)", "Imp (A)", "Vmp (V)", "Isc (A)", "Voc (V)",
+        "Expected degradation loss % of expected energy",
+        "Temp coefficient: fractional loss per °C above 25 (e.g. 0.004)",
+    ]
+    inv_ex = [
+        "INV-01", "inverter", "SMA", "Sunny Tripower 50",
+        500.0, 525.0, 500.0, 98.5, 98.5,
+        450.0, 850.0, 900.0, 1050.0, 9.5, 555.0, 9.8, 650.0,
+        0.5, 0.004,
+    ]
+    mod_cols = [
+        "equipment_id", "equipment_type", "manufacturer", "model",
+        "pmax", "impp", "vmpp", "isc", "voc",
+        "module_efficiency_pct",
+        "degradation_year1_pct", "degradation_year2_pct", "degradation_annual_pct",
+        "alpha_stc", "beta_stc", "gamma_stc",
+        "alpha_noct", "beta_noct", "gamma_noct",
+    ]
+    mod_desc = [
+        "Module ID  e.g. MOD-01 (or same for whole plant)",
+        "Must be 'module'",
+        "Manufacturer name", "Model name / number",
+        "Pmax at STC (W)", "Impp (A)", "Vmpp (V)", "Isc (A)", "Voc (V)",
+        "Module efficiency % at STC",
+        "Year-1 degradation %", "Year-2 degradation %", "Annual degradation % after year 2",
+        "Alpha STC (Isc temp coeff A/°C)", "Beta STC (Voc temp coeff V/°C)", "Gamma STC (Pmax temp coeff %/°C)",
+        "Alpha NOCT", "Beta NOCT", "Gamma NOCT",
+    ]
+    mod_ex = [
+        "MOD-01", "module", "Vikram Solar", "ELDORA PRO 545",
+        545.0, 12.94, 42.14, 13.66, 49.9,
+        21.0, 2.0, 0.7, 0.35,
+        0.05, -0.27, -0.36,
+        0.05, -0.27, -0.36,
+    ]
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        wb = writer.book
+        hdr_fmt  = wb.add_format({"bold": True, "bg_color": "#1a3a5c", "font_color": "#ffffff", "border": 1, "text_wrap": True})
+        desc_fmt = wb.add_format({"italic": True, "font_color": "#5a7a9a", "bg_color": "#f0f7ff", "text_wrap": True, "border": 1})
+        data_fmt = wb.add_format({"border": 1})
+        for sheet_name, cols, descs, ex_row in [
+            ("Inverter", inv_cols, inv_desc, inv_ex),
+            ("Module",   mod_cols, mod_desc, mod_ex),
+        ]:
+            ws = wb.add_worksheet(sheet_name)
+            ws.set_row(0, 28)
+            ws.set_row(1, 48)
+            for ci, (col, d) in enumerate(zip(cols, descs)):
+                ws.write(0, ci, col, hdr_fmt)
+                ws.write(1, ci, d, desc_fmt)
+                ws.set_column(ci, ci, max(14, len(d) // 3))
+            for ci, val in enumerate(ex_row):
+                ws.write(2, ci, val, data_fmt)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=equipment_specs_template.xlsx"},
+    )
 
 
 @router.get("/template/raw-data")
 def download_raw_data_template(current_user: User = Depends(get_current_user)):
-    """Download an exact replica of the NTPC format report as the template."""
-    # Build a small dummy NTPC report format matrix
-    # Shape needs to match the parsing logic exactly
-    rows = [
-        ["", "", " NTPC NOKHRA,Rajasthan", "", "", "", "", ""],
-        [""] * 8,
-        ["REPORT"] + [""] * 7,
-        [""] * 8,
-        ["Date and Time : 3/11/2026", "", "", "", "To : 3/11/2026", "", "", ""],
-        [""] * 8,
-        ["DATE AND TIME", "", "", "ICR01", "", "ICR01", "", "WMS"],
-        ["", "", "", "INV1", "", "INV2", "", "WMS"],
-        ["", "", "", "DC_INPUT_CURRENT01", "DC_INPUT_CURRENT02", "DC_INPUT_CURRENT01", "DC_INPUT_CURRENT02", "GHI Main (W/m2)"],
-        ["2026-03-11 08:00:00", "", "", 99.3, 98.1, 97.4, 98.6, 650.0],
-        ["2026-03-11 09:00:00", "", "", 150.1, 148.5, 149.2, 147.9, 850.0]
-    ]
-    df = pd.DataFrame(rows)
-    # We use header=False when saving because we built headers as rows
-    
+    """Download a generic flat raw-data template (one measurement per row).
+    This is the universal format — works for any plant / SCADA system.
+    Upload this via 'Upload Excel' in the Raw Data tab.
+    """
     buf = io.BytesIO()
+    cols = ["timestamp", "equipment_level", "equipment_id", "signal", "value"]
+    descs = [
+        "ISO datetime  e.g. 2026-03-11 08:00:00",
+        "'inverter' | 'scb' | 'string' | 'plant'",
+        "ID matching your architecture  e.g. INV-01 or INV-01-SCB-01",
+        "Signal name: dc_current | dc_voltage | ac_power | dc_power | irradiance | ghi | gti | ambient_temp | module_temp | wind_speed | string_current",
+        "Numeric value in natural units (A / V / kW / W·m⁻²)",
+    ]
+    examples = [
+        ["2026-03-11 08:00:00", "scb",      "INV-01-SCB-01", "dc_current",   125.4],
+        ["2026-03-11 08:00:00", "scb",      "INV-01-SCB-01", "dc_voltage",   550.2],
+        ["2026-03-11 08:00:00", "scb",      "INV-01-SCB-02", "dc_current",   123.1],
+        ["2026-03-11 08:00:00", "inverter",  "INV-01",        "ac_power",    480.0],
+        ["2026-03-11 08:00:00", "inverter",  "INV-01",        "dc_power",    495.0],
+        ["2026-03-11 08:00:00", "plant",     "PLANT-01",      "irradiance",  650.0],
+        ["2026-03-11 08:00:00", "plant",     "PLANT-01",      "ghi",         630.0],
+        ["2026-03-11 08:00:00", "plant",     "PLANT-01",      "ambient_temp", 32.5],
+        ["2026-03-11 08:15:00", "scb",      "INV-01-SCB-01", "dc_current",   130.2],
+        ["2026-03-11 08:15:00", "inverter",  "INV-01",        "ac_power",    500.0],
+    ]
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
-        df.to_excel(writer, index=False, header=False)
+        wb = writer.book
+        ws = wb.add_worksheet("RawData")
+        hdr_fmt  = wb.add_format({"bold": True, "bg_color": "#1a3a5c", "font_color": "#ffffff", "border": 1})
+        desc_fmt = wb.add_format({"italic": True, "font_color": "#5a7a9a", "bg_color": "#f0f7ff", "text_wrap": True, "border": 1})
+        data_fmt = wb.add_format({"border": 1})
+        num_fmt  = wb.add_format({"border": 1, "num_format": "0.0##"})
+        widths   = [22, 14, 22, 20, 12]
+        ws.set_row(0, 24)
+        ws.set_row(1, 60)
+        for ci, (col, d, w) in enumerate(zip(cols, descs, widths)):
+            ws.write(0, ci, col, hdr_fmt)
+            ws.write(1, ci, d, desc_fmt)
+            ws.set_column(ci, ci, w)
+        for ri, row_data in enumerate(examples):
+            for ci, val in enumerate(row_data):
+                fmt = num_fmt if isinstance(val, float) else data_fmt
+                ws.write(ri + 2, ci, val, fmt)
     buf.seek(0)
     return StreamingResponse(
         buf,
-        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers    = {"Content-Disposition": "attachment; filename=raw_data_ntpc_template.xlsx"},
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=raw_data_generic_template.xlsx"},
     )
+
+
+# ── Generic Flat Raw Data Upload ───────────────────────────────────────────────
+@router.post("/upload-raw-data-generic")
+async def upload_raw_data_generic(
+    plant_id: str = Form(...),
+    file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Upload raw data in generic flat format (timestamp, equipment_level, equipment_id, signal, value).
+    Works for ANY plant — no SCADA-specific column mapping needed.
+    After upload, DS fault detection runs automatically in the background.
+    """
+    content = await file.read()
+    df = pd.read_excel(io.BytesIO(content), dtype=str)
+    df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+
+    required = {"timestamp", "equipment_level", "equipment_id", "signal", "value"}
+    missing = required - set(df.columns)
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing columns: {missing}. Required: timestamp, equipment_level, equipment_id, signal, value")
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df["value"]     = pd.to_numeric(df["value"],     errors="coerce")
+    df.dropna(subset=["timestamp", "value"], inplace=True)
+    df["equipment_level"] = df["equipment_level"].str.strip().str.lower()
+    df["equipment_id"]    = df["equipment_id"].str.strip()
+    df["signal"]          = df["signal"].str.strip().str.lower()
+    df["plant_id"]        = plant_id
+
+    if df.empty:
+        raise HTTPException(status_code=400, detail="No valid rows found after parsing. Check timestamp and value columns.")
+
+    BATCH = 5000
+    records = df[["plant_id","timestamp","equipment_level","equipment_id","signal","value"]].to_dict("records")
+    for i in range(0, len(records), BATCH):
+        chunk = records[i:i+BATCH]
+        db.execute(
+            sa_text("""
+                INSERT INTO raw_data_generic (plant_id, timestamp, equipment_level, equipment_id, signal, value)
+                VALUES (:plant_id, :timestamp, :equipment_level, :equipment_id, :signal, :value)
+                ON CONFLICT (plant_id, timestamp, equipment_level, equipment_id, signal) DO UPDATE
+                SET value = EXCLUDED.value
+            """),
+            chunk,
+        )
+    db.commit()
+
+    # Build DS-detection DataFrame from SCB dc_current rows
+    scb_df = df[
+        (df["equipment_level"] == "scb") & (df["signal"] == "dc_current")
+    ][["timestamp","equipment_id","value"]].copy()
+    scb_df = scb_df.rename(columns={"equipment_id": "scb_id", "value": "scb_current"})
+
+    # Try to attach inverter_id from architecture
+    try:
+        arch_rows = db.execute(
+            sa_text("SELECT DISTINCT scb_id, inverter_id FROM plant_architecture WHERE plant_id=:p AND scb_id IS NOT NULL"),
+            {"p": plant_id},
+        ).fetchall()
+        inv_map = {r[0]: r[1] for r in arch_rows}
+        scb_df["inverter_id"] = scb_df["scb_id"].map(inv_map)
+    except Exception:
+        scb_df["inverter_id"] = None
+
+    rows_inserted = len(records)
+    arch_ok = bool(scb_df["inverter_id"].notna().any()) if not scb_df.empty else False
+
+    if not scb_df.empty and arch_ok:
+        background_tasks.add_task(_post_upload_refresh, plant_id, scb_df, db)
+
+    return {
+        "success": True,
+        "rows_inserted": rows_inserted,
+        "scb_rows_for_ds": len(scb_df),
+        "arch_matched": arch_ok,
+        "message": "Fault detection started in background." if arch_ok else
+                   "Data uploaded. Upload plant architecture first to enable fault detection.",
+    }
+
+
+# ── Run Fault Computation on Demand ───────────────────────────────────────────
+@router.post("/run-fault-computation")
+def run_fault_computation(
+    plant_id: str = Query(...),
+    date_from: str = Query(None),
+    date_to:   str = Query(None),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Re-trigger DS fault detection on already-ingested raw data.
+    Call this after uploading architecture or whenever you want to refresh fault results.
+    Computation runs in the background — returns immediately.
+    """
+    # Build date filter
+    filters = ["plant_id = :p", "equipment_level = 'scb'", "signal = 'dc_current'"]
+    params: dict = {"p": plant_id}
+    if date_from:
+        filters.append("timestamp >= :df"); params["df"] = date_from
+    if date_to:
+        filters.append("timestamp <= :dt"); params["dt"] = date_to
+
+    sql = f"SELECT timestamp, equipment_id AS scb_id, value AS scb_current FROM raw_data_generic WHERE {' AND '.join(filters)} LIMIT 500000"
+    rows = db.execute(sa_text(sql), params).fetchall()
+    if not rows:
+        return {"success": False, "message": "No SCB dc_current data found for this plant/date range. Upload raw data first."}
+
+    scb_df = pd.DataFrame(rows, columns=["timestamp","scb_id","scb_current"])
+    scb_df["timestamp"]   = pd.to_datetime(scb_df["timestamp"])
+    scb_df["scb_current"] = pd.to_numeric(scb_df["scb_current"], errors="coerce")
+
+    # Attach inverter_id from architecture
+    arch_rows = db.execute(
+        sa_text("SELECT DISTINCT scb_id, inverter_id FROM plant_architecture WHERE plant_id=:p AND scb_id IS NOT NULL"),
+        {"p": plant_id},
+    ).fetchall()
+    inv_map = {r[0]: r[1] for r in arch_rows}
+    if not inv_map:
+        return {"success": False, "message": "No plant architecture found. Upload architecture first (Metadata → Plant Architecture)."}
+
+    scb_df["inverter_id"] = scb_df["scb_id"].map(inv_map)
+    matched = int(scb_df["inverter_id"].notna().sum())
+
+    background_tasks.add_task(_post_upload_refresh, plant_id, scb_df, db)
+
+    return {
+        "success": True,
+        "scb_rows": len(scb_df),
+        "arch_matched_rows": matched,
+        "message": f"Fault detection triggered for {len(scb_df):,} SCB rows ({matched:,} matched to architecture). Results appear in Fault Diagnostics within seconds.",
+    }
 
 
 @router.get("/raw-data-summary")

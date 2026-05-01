@@ -237,29 +237,43 @@ window.FormInput = ({
 window.Modal = ({ title, open, onClose, children, footer }) => {
   const h = React.createElement;
   const overlayRef = useRef(null);
-  
+  // Track whether we already focused on open — avoids re-stealing focus on every
+  // parent re-render (e.g. each keystroke in a controlled input inside the modal).
+  const didFocusRef = useRef(false);
+
   useEffect(() => {
-    if (!open) return;
-    
-    // Trap focus within modal (ESC key support comes from KeyboardEvent)
+    if (!open) {
+      didFocusRef.current = false; // reset so next open focuses correctly
+      return;
+    }
+
     const handleKeyDown = (e) => {
       if (e.key === 'Escape') {
         e.stopPropagation();
         onClose();
       }
     };
-    
-    // Add escape key listener
+
     document.addEventListener('keydown', handleKeyDown);
-    
-    // Prevent body scroll when modal is open
     document.body.classList.add('no-scroll');
-    
-    // Focus the modal for keyboard navigation
-    if (overlayRef.current) {
-      overlayRef.current.focus();
+
+    // Only focus the overlay once on first open — never steal focus from inputs
+    if (!didFocusRef.current && overlayRef.current) {
+      didFocusRef.current = true;
+      // Use setTimeout(0) so any autofocus on children runs first;
+      // if nothing else grabbed focus, move it to the overlay for ESC support.
+      const t = setTimeout(() => {
+        if (overlayRef.current && !overlayRef.current.contains(document.activeElement)) {
+          overlayRef.current.focus();
+        }
+      }, 0);
+      return () => {
+        clearTimeout(t);
+        document.removeEventListener('keydown', handleKeyDown);
+        document.body.classList.remove('no-scroll');
+      };
     }
-    
+
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
       document.body.classList.remove('no-scroll');

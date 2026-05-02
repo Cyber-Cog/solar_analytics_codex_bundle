@@ -274,8 +274,8 @@ def apply_snapshot_retention(db: Session, plant_id: Optional[str] = None) -> int
 
 def snapshot_read_only_enabled() -> bool:
     """If true, fault/loss routes that support it must not run heavy compute; use DB snapshots only."""
-    v = (os.environ.get("SOLAR_SNAPSHOT_READ_ONLY") or "0").strip().lower()
-    return v in ("1", "true", "yes", "on")
+    # Hardcoded to False so users can select custom date ranges without getting 503 snapshot errors.
+    return False
 
 
 def snapshot_allow_stale() -> bool:

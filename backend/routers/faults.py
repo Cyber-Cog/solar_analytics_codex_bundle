@@ -376,18 +376,13 @@ def _min_disconnected_strings(session: Session, plant_id: str, date_from: Option
         return {}
 
 
-def _range_min_disconnected_strings(session: Session, plant_id: str, date_from: Optional[str], date_to: Optional[str]) -> dict:
+def _active_disconnected_strings_in_range(session: Session, plant_id: str, date_from: Optional[str], date_to: Optional[str]) -> dict:
     """
-    Return {scb_id: min_missing_strings} across ALL timestamps in the selected range.
+    Return {scb_id: min_missing_strings} for any SCB that had a confirmed DS fault
+    at ANY point during the selected date range.
 
-    This is used by the heatmap because the user wants the displayed disconnected
-    string count to be the minimum over the full selected window. If any timestamp
-    in the range has missing_strings = 0, the heatmap must show 0 for that SCB.
-
-    Cast to integer so MIN is numeric; if the column is TEXT, MIN would otherwise
-    be lexicographic (e.g. "1216" < "22") and the table would not match the chart.
-    Cap each row at 2000 so a single bad row (e.g. from negative current) does not
-    become the displayed minimum; the real minimum (e.g. 22) is then used.
+    By filtering `fault_status = 'CONFIRMED_DS'`, we ignore timestamps where the SCB
+    was healthy (missing_strings=0), so temporary faults don't get hidden by healthy periods.
     """
     f_ts = f"{date_from} 00:00:00" if date_from else "1970-01-01 00:00:00"
     t_ts = f"{date_to} 23:59:59" if date_to else "2099-12-31 23:59:59"
@@ -398,15 +393,18 @@ def _range_min_disconnected_strings(session: Session, plant_id: str, date_from: 
         END) AS min_ms
         FROM fault_diagnostics
         WHERE plant_id = :p
+          AND fault_status = 'CONFIRMED_DS'
           AND timestamp >= :f
           AND timestamp <= :t
         GROUP BY scb_id
+        HAVING MIN(CAST(COALESCE(missing_strings, 0) AS INTEGER)) > 0
     """)
     try:
         rows = session.execute(sql, {"p": plant_id, "f": f_ts, "t": t_ts}).fetchall()
         return {r[0]: int(r[1]) for r in rows if r[1] is not None}
     except Exception:
         return {}
+
 
 
 def _voltage_meta(session: Session, plant_id: str, date_from: Optional[str] = None, date_to: Optional[str] = None, scb_id: Optional[str] = None):
@@ -555,7 +553,7 @@ def build_ds_summary_dict(
             communicating_scbs = 0
 
     # Min(missing_strings) over range; exclude filter-summary SCBs so card matches table.
-    range_min_map = _range_min_disconnected_strings(db, plant_id, date_from, date_to)
+    range_min_map = _active_disconnected_strings_in_range(db, plant_id, date_from, date_to)
     excluded_by_filter = set()
     if date_from and date_to:
         try:
@@ -729,21 +727,17 @@ def build_ds_scb_status_payload(
         where += " AND f.timestamp <= :t"
         params["t"] = t_ts
 
+    # Only fetch the latest CONFIRMED_DS row for each SCB so the table reflects the fault
     sql = _text(f"""
-        SELECT f.* FROM fault_diagnostics f
-        INNER JOIN (
-            SELECT scb_id, MAX(timestamp) AS max_ts
-            FROM fault_diagnostics
-            {where.replace('f.', '')}
-            GROUP BY scb_id
-        ) g ON f.scb_id = g.scb_id AND f.timestamp = g.max_ts
-        {where}
-        ORDER BY f.scb_id
+        SELECT DISTINCT ON (scb_id) *
+        FROM fault_diagnostics
+        {where.replace('f.', '')} AND fault_status = 'CONFIRMED_DS'
+        ORDER BY scb_id, timestamp DESC
     """)
     rows = db.execute(sql, params).fetchall()
     cols = [c.key for c in FaultDiagnostics.__table__.columns]
 
-    range_min_map = _range_min_disconnected_strings(db, plant_id, date_from, date_to)
+    range_min_map = _active_disconnected_strings_in_range(db, plant_id, date_from, date_to)
     scb_day_map = {}
     idx_scb = cols.index("scb_id")
     idx_ts = cols.index("timestamp")

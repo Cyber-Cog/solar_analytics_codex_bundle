@@ -45,6 +45,7 @@ class Plant(Base):
     cod_date        = Column(String, nullable=True)   # Commercial Operation Date
     ppa_tariff      = Column(Float, nullable=True)
     status          = Column(String, default="Active")
+    plant_type      = Column(String, default="SCB")  # SCB | MPPT (Tiger is MPPT)
     owner_id        = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at      = Column(DateTime, server_default=func.now())
 
@@ -226,6 +227,33 @@ class FaultEpisodeDay(Base):
     __table_args__ = (
         UniqueConstraint("episode_id", "day", name="uq_fault_episode_day"),
         Index("idx_fault_episode_days_plant_scb_day", "plant_id", "scb_id", "day"),
+    )
+
+
+class FaultEvent(Base):
+    __tablename__ = "fault_events"
+
+    id                   = Column(BigInteger, primary_key=True, autoincrement=True)
+    plant_id             = Column(String, nullable=False, index=True)
+    inverter_id          = Column(String, nullable=True, index=True)
+    equipment_level      = Column(String, nullable=False)  # mppt | scb | inverter
+    equipment_id         = Column(String, nullable=False, index=True)
+    fault_type           = Column(String, nullable=False, default="DS")
+    start_time           = Column(DateTime(timezone=True), nullable=False, index=True)
+    end_time             = Column(DateTime(timezone=True), nullable=True, index=True)
+    duration_minutes     = Column(Float, nullable=True)
+    status               = Column(String, nullable=False, default="closed")
+    severity             = Column(String, nullable=True)
+    detection_confidence = Column(Float, nullable=True)
+    missing_strings      = Column(Integer, nullable=True)
+    start_reason         = Column(Text, nullable=True)
+    close_reason         = Column(Text, nullable=True)
+    created_at           = Column(DateTime, server_default=func.now())
+    updated_at           = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        Index("idx_fault_events_lookup", "plant_id", "equipment_id", "fault_type", "start_time", "end_time"),
+        Index("idx_fault_events_inverter_range", "plant_id", "inverter_id", "start_time", "end_time"),
     )
 
 

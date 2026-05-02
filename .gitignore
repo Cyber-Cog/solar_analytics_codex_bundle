@@ -5,10 +5,19 @@ __pycache__/
 *.pyd
 *.pycache
 
-# Environment
+# Environment — never commit credentials
 .env
 *.env
+.env.local
+.env.*.local
 !.env.example
+
+# Node / Next.js
+node_modules/
+frontend-next/.next/
+frontend-next/node_modules/
+.next/
+next-env.d.ts
 
 # Databases & dumps
 *.db

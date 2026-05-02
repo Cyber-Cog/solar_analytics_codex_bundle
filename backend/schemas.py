@@ -61,6 +61,7 @@ class PlantCreate(BaseModel):
     cod_date: Optional[str] = None
     ppa_tariff: Optional[float] = None
     status: Optional[str] = "Active"
+    plant_type: Optional[str] = "SCB"
 
 
 class PlantResponse(BaseModel):
@@ -73,6 +74,7 @@ class PlantResponse(BaseModel):
     cod_date: Optional[str]
     ppa_tariff: Optional[float]
     status: Optional[str]
+    plant_type: Optional[str] = "SCB"
 
     class Config:
         from_attributes = True

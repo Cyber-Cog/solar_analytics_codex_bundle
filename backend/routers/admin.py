@@ -21,12 +21,17 @@ from models import (
     EquipmentSpec, SupportTicket, FaultDiagnostics, FaultEpisode,
     FaultEpisodeDay, PlantEquipment, RawDataStats, ScbFaultReview,
     FaultRuntimeSnapshot, FaultCache, PrecomputeJob, UnifiedFeedCategoryTotal,
+    FaultEvent,
 )
 from schemas import UserCreate, UserUpdate, UserResponse, MessageResponse
 from auth.routes import get_current_user
 from auth.jwt import hash_password
 
 router = APIRouter(prefix="/api/admin", tags=["Admin"])
+
+
+class PlantAdminUpdate(BaseModel):
+    plant_type: Optional[str] = Field(default=None, description="SCB | MPPT")
 
 def check_admin(user: User = Depends(get_current_user)):
     if not user.is_admin:
@@ -151,6 +156,7 @@ def delete_plant_forever(
             FaultDiagnostics,
             FaultEpisode,
             FaultEpisodeDay,
+            FaultEvent,
             PlantEquipment,
             RawDataStats,
             ScbFaultReview,
@@ -193,6 +199,26 @@ def delete_plant_forever(
         pass
 
     return MessageResponse(message=f"Plant '{plant_id}' and all related data were deleted permanently")
+
+
+@router.put("/plants/{plant_id}", response_model=MessageResponse)
+def update_plant_admin(
+    plant_id: str,
+    payload: PlantAdminUpdate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_admin),
+):
+    plant_id = str(plant_id or "").strip()
+    plant = db.query(Plant).filter(Plant.plant_id == plant_id).first()
+    if not plant:
+        raise HTTPException(status_code=404, detail=f"Plant '{plant_id}' not found")
+    if payload.plant_type is not None:
+        plant_type = str(payload.plant_type or "").strip().upper()
+        if plant_type not in {"SCB", "MPPT"}:
+            raise HTTPException(status_code=400, detail="plant_type must be SCB or MPPT")
+        plant.plant_type = plant_type
+    db.commit()
+    return MessageResponse(message=f"Plant '{plant_id}' updated successfully")
 
 # -- Site appearance (org default theme; stored in fault_cache, no new tables) --
 from routers.site import SITE_APPEARANCE_KEY, _normalize_theme_id, ALLOWED_ORG_THEMES

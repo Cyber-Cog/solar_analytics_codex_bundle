@@ -235,6 +235,15 @@ window.AdminPage = (props = {}) => {
     }
   };
 
+  const handlePlantTypeChange = async (plantId, plantType) => {
+    try {
+      await window.SolarAPI.Admin.updatePlant(plantId, { plant_type: plantType });
+      loadAll();
+    } catch (e) {
+      alert(e && (e.message || e.detail || String(e)) || 'Failed to update plant type');
+    }
+  };
+
   const userColumns = [
     { key:'id', label:'ID', csvValue:(u)=>u.id },
     {
@@ -302,6 +311,20 @@ window.AdminPage = (props = {}) => {
       label: 'Status',
       render: (p) => p.status || '-',
       csvValue: (p) => p.status || '-',
+    },
+    {
+      key: 'plant_type',
+      label: 'Plant Type',
+      render: (p) => h('select', {
+        className: 'form-input',
+        value: (p.plant_type || (String(p.plant_id || '').toUpperCase().includes('TIGER') ? 'MPPT' : 'SCB')),
+        style: { minWidth: 90, padding: '4px 6px', fontSize: 12 },
+        onChange: (e) => handlePlantTypeChange(p.plant_id, e.target.value),
+      },
+        h('option', { value: 'SCB' }, 'SCB'),
+        h('option', { value: 'MPPT' }, 'MPPT')
+      ),
+      csvValue: (p) => p.plant_type || 'SCB',
     },
     {
       key: 'actions',

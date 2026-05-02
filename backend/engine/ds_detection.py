@@ -29,6 +29,7 @@ Pipeline order:
 
 import os
 import re
+from datetime import timezone
 from typing import Optional
 
 import numpy as np
@@ -36,11 +37,11 @@ import pandas as pd
 from sqlalchemy import delete, text as sa_text
 from sqlalchemy.orm import Session
 
-from models import FaultDiagnostics
+from models import FaultDiagnostics, FaultEvent
 
 
 # ── Config (env-overridable) ──────────────────────────────────────────────────
-IRRADIANCE_MIN = float(os.getenv("DS_IRRADIANCE_MIN", "100"))
+IRRADIANCE_MIN = float(os.getenv("DS_IRRADIANCE_MIN", "150"))
 IRRADIANCE_MAX = float(os.getenv("DS_IRRADIANCE_MAX", "1200"))
 
 # Leakage detection thresholds
@@ -58,6 +59,17 @@ CONST_UNIQUE_MAX = int(os.getenv("DS_CONSTANT_UNIQUE_MAX", "3"))
 
 # Persistence: fault must last 30 MINUTES continuously (auto-converted to timestamps)
 PERSISTENCE_MINUTES = int(os.getenv("DS_PERSISTENCE_MINUTES", "30"))
+RECOVERY_MINUTES = int(os.getenv("DS_RECOVERY_MINUTES", "15"))
+DATA_GAP_MULTIPLIER = float(os.getenv("DS_EVENT_GAP_MULTIPLIER", "3.0"))
+
+# Simple, conservative DS thresholds. These are intentionally strict because
+# false positives are more damaging than missed single-sample anomalies.
+DS_CURRENT_DROP_PCT = float(os.getenv("DS_CURRENT_DROP_PCT", "0.30"))
+DS_COMPARE_RATIO = max(0.0, min(1.0, 1.0 - DS_CURRENT_DROP_PCT))
+DS_VOLTAGE_TOL_PCT = float(os.getenv("DS_VOLTAGE_TOL_PCT", "10"))
+DS_ROLLING_MEDIAN_WINDOW = int(os.getenv("DS_ROLLING_MEDIAN_WINDOW", "5"))
+DS_ZERO_EXPORT_KW_MIN = float(os.getenv("DS_ZERO_EXPORT_KW_MIN", "0.5"))
+DS_ZERO_EXPORT_MEDIAN_RATIO = float(os.getenv("DS_ZERO_EXPORT_MEDIAN_RATIO", "0.02"))
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -191,6 +203,286 @@ def _fetch_irradiance_map(
     return signal, irr_map
 
 
+def _get_plant_type(db: Session, plant_id: str) -> str:
+    """
+    Return SCB or MPPT. Tiger is forced to MPPT because its uploaded "SCB"
+    channels represent MPPTs, per plant configuration/domain knowledge.
+    """
+    key = str(plant_id or "").upper()
+    if "TIGER" in key:
+        return "MPPT"
+    try:
+        row = db.execute(
+            sa_text("SELECT plant_type FROM plants WHERE plant_id=:p"),
+            {"p": plant_id},
+        ).fetchone()
+        val = str(row[0] if row else "").strip().upper()
+        if val in {"MPPT", "SCB"}:
+            return val
+    except Exception:
+        pass
+    return "SCB"
+
+
+def _fetch_inverter_signal_map(db: Session, plant_id: str, from_ts: str, to_ts: str, signals: set[str]) -> dict:
+    if not signals:
+        return {}
+    clean = sorted({str(s).strip().replace("'", "''") for s in signals if str(s).strip()})
+    if not clean:
+        return {}
+    placeholders = ",".join(f"'{s}'" for s in clean)
+    try:
+        rows = db.execute(
+            sa_text(
+                f"""
+                SELECT timestamp, equipment_id, signal, AVG(value) AS v
+                FROM raw_data_generic
+                WHERE plant_id=:p
+                  AND LOWER(TRIM(equipment_level::text)) = 'inverter'
+                  AND signal IN ({placeholders})
+                  AND timestamp >= :f AND timestamp <= :t
+                GROUP BY timestamp, equipment_id, signal
+                """
+            ),
+            {"p": plant_id, "f": from_ts, "t": to_ts},
+        ).fetchall()
+    except Exception:
+        return {}
+    return {
+        (pd.to_datetime(r[0]), str(r[1]), str(r[2])): float(r[3])
+        for r in rows
+        if r[0] is not None and r[1] is not None and r[2] is not None and r[3] is not None
+    }
+
+
+def _apply_operating_filters(df: pd.DataFrame, db: Session, plant_id: str, from_ts: str, to_ts: str, irr_map: dict) -> pd.DataFrame:
+    """
+    Mandatory fault suppression layer: do not run DS during night/low irradiance,
+    inverter off, or zero-export/grid-breakdown windows.
+    """
+    if df.empty:
+        return df
+
+    if irr_map:
+        df["irradiance"] = pd.to_numeric(df["timestamp"].map(irr_map), errors="coerce")
+        df = df[
+            np.isfinite(df["irradiance"])
+            & (df["irradiance"] >= IRRADIANCE_MIN)
+            & (df["irradiance"] <= IRRADIANCE_MAX)
+        ].copy()
+    else:
+        t = df["timestamp"].dt.time
+        df = df[
+            (t >= pd.to_datetime("06:00:00").time())
+            & (t <= pd.to_datetime("19:00:00").time())
+        ].copy()
+    if df.empty:
+        return df
+
+    inv_map = _fetch_inverter_signal_map(
+        db,
+        plant_id,
+        from_ts,
+        to_ts,
+        {"status", "ac_power", "active_power", "power", "energy_export_kwh"},
+    )
+    if inv_map:
+        # Inverter OFF/status=0: if status telemetry exists, keep only ON windows.
+        status = [
+            inv_map.get((ts, inv, "status"), np.nan)
+            for ts, inv in zip(df["timestamp"], df["inverter_id"])
+        ]
+        if np.isfinite(pd.Series(status, dtype="float64")).any():
+            df["_inv_status"] = pd.to_numeric(status, errors="coerce")
+            df = df[(df["_inv_status"].isna()) | (df["_inv_status"] > 0.5)].copy()
+            df.drop(columns=["_inv_status"], inplace=True, errors="ignore")
+        if df.empty:
+            return df
+
+        # Grid failure / zero-export: only use true power-like signals, not cumulative energy.
+        power_vals = []
+        for ts, inv in zip(df["timestamp"], df["inverter_id"]):
+            val = np.nan
+            for sig in ("ac_power", "active_power", "power"):
+                got = inv_map.get((ts, inv, sig))
+                if got is not None:
+                    val = got
+                    break
+            power_vals.append(val)
+        pser = pd.to_numeric(pd.Series(power_vals, index=df.index), errors="coerce")
+        df["_inv_id_col"] = df["inverter_id"].values
+
+        # For each inverter, determine whether *any* power measurement exists.
+        # Inverters with fully-NaN power history are ambiguous (sensor gap, not zero
+        # export), so we remove their rows rather than falsely reporting DS.
+        inv_has_power = (
+            pser.groupby(df["_inv_id_col"]).transform(lambda s: np.isfinite(s).any())
+        )
+        df = df[inv_has_power | inv_has_power.isna()].copy()
+        df.drop(columns=["_inv_id_col"], inplace=True, errors="ignore")
+        if df.empty:
+            return df
+
+        pser = pser.loc[df.index]
+        positive = pser[np.isfinite(pser) & (pser > 0)]
+        if not positive.empty:
+            threshold = max(DS_ZERO_EXPORT_KW_MIN, float(positive.median()) * DS_ZERO_EXPORT_MEDIAN_RATIO)
+            df = df[pser.isna() | (pser > threshold)].copy()
+
+    return df
+
+
+def _smooth_measurements(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    window = max(1, int(DS_ROLLING_MEDIAN_WINDOW))
+    if window <= 1:
+        return df
+    df = df.sort_values(["scb_id", "timestamp"]).copy()
+    for col in ("scb_current", "dc_voltage"):
+        if col not in df.columns:
+            continue
+        med = (
+            df.groupby("scb_id", sort=False)[col]
+            .transform(lambda s: s.rolling(window=window, min_periods=1, center=True).median())
+        )
+        df[col] = pd.to_numeric(med, errors="coerce")
+    return df
+
+
+def _voltage_ok_series(df: pd.DataFrame, group_cols: list[str]) -> pd.Series:
+    volts = pd.to_numeric(df["dc_voltage"], errors="coerce")
+    group_median = volts.groupby([df[c] for c in group_cols]).transform("median")
+    group_count = volts.groupby([df[c] for c in group_cols]).transform(lambda s: int(np.isfinite(s).sum()))
+    pct = (volts - group_median).abs() / group_median.replace(0, np.nan) * 100.0
+    # When fewer than 2 voltage peers exist, we cannot compute a meaningful spread.
+    # Defaulting to True avoids vetoing real DS faults just because one inverter has
+    # a single SCB with voltage data — the current-drop evidence is still valid.
+    within_tol = np.isfinite(pct) & (pct <= DS_VOLTAGE_TOL_PCT)
+    return pd.Series(
+        np.where(group_count >= 2, within_tol, True),
+        index=df.index,
+        dtype=bool,
+    )
+
+
+def _rebuild_fault_events_from_diagnostics(
+    db: Session,
+    plant_id: str,
+    equipment_ids: set[str],
+    equipment_level: str,
+    resolution_minutes: float,
+) -> None:
+    """
+    Build interval events from row-wise CONFIRMED_DS diagnostics.
+    Separate recovered/reappeared faults remain separate events.
+    """
+    ids = sorted({str(x).strip() for x in equipment_ids if str(x).strip()})
+    if not ids:
+        return
+
+    db.execute(
+        sa_text(
+            "DELETE FROM fault_events "
+            "WHERE plant_id=:p AND equipment_id = ANY(:ids) AND fault_type='DS'"
+        ),
+        {"p": plant_id, "ids": ids},
+    )
+    db.flush()
+
+    rows = db.execute(
+        sa_text(
+            """
+            SELECT timestamp, inverter_id, scb_id, COALESCE(missing_strings, 0) AS ms
+            FROM fault_diagnostics
+            WHERE plant_id=:p
+              AND scb_id = ANY(:ids)
+              AND fault_status='CONFIRMED_DS'
+            ORDER BY scb_id, timestamp
+            """
+        ),
+        {"p": plant_id, "ids": ids},
+    ).fetchall()
+    if not rows:
+        db.commit()
+        return
+
+    gap_seconds = max(
+        (resolution_minutes or 1.0) * 60.0 * DATA_GAP_MULTIPLIER,
+        RECOVERY_MINUTES * 60.0,
+    )
+    events: list[dict] = []
+    current = None
+    prev_ts = None
+    prev_equipment = None
+    prev_inv = None
+    max_ms = 0
+
+    def close_event(end_ts):
+        nonlocal current, max_ms
+        if current is None:
+            return
+        duration = max(0.0, (end_ts - current["start_time"]).total_seconds() / 60.0)
+        current.update(
+            {
+                "end_time": end_ts,
+                "duration_minutes": duration,
+                "status": "closed",
+                "severity": "high" if max_ms >= 2 else "medium",
+                "detection_confidence": min(0.99, 0.70 + 0.10 * max_ms),
+                "missing_strings": int(max_ms),
+                "close_reason": "condition_recovered_or_gap",
+            }
+        )
+        events.append(current)
+        current = None
+        max_ms = 0
+
+    for r in rows:
+        ts = pd.to_datetime(r[0], errors="coerce")
+        if pd.isna(ts):
+            continue
+        ts_py = ts.to_pydatetime()
+        if ts_py.tzinfo is None:
+            ts_py = ts_py.replace(tzinfo=timezone.utc)
+        equipment_id = str(r[2])
+        inverter_id = str(r[1]) if r[1] is not None else None
+        missing = int(r[3] or 0)
+        gap = None if prev_ts is None else (ts_py - prev_ts).total_seconds()
+        needs_new = (
+            current is None
+            or equipment_id != prev_equipment
+            or (gap is not None and gap > gap_seconds)
+        )
+        if needs_new:
+            if current is not None and prev_ts is not None:
+                close_event(prev_ts)
+            current = {
+                "plant_id": plant_id,
+                "inverter_id": inverter_id,
+                "equipment_level": equipment_level,
+                "equipment_id": equipment_id,
+                "fault_type": "DS",
+                "start_time": ts_py,
+                "start_reason": "persistent_relative_current_drop_voltage_consistent",
+            }
+            max_ms = max(0, missing)
+        else:
+            max_ms = max(max_ms, missing)
+            if current is not None and current.get("inverter_id") is None:
+                current["inverter_id"] = inverter_id or prev_inv
+        prev_ts = ts_py
+        prev_equipment = equipment_id
+        prev_inv = inverter_id
+
+    if current is not None and prev_ts is not None:
+        close_event(prev_ts)
+
+    if events:
+        db.bulk_insert_mappings(FaultEvent, events)
+    db.commit()
+
+
 # ── Main Entry Point ──────────────────────────────────────────────────────────
 
 def run_ds_detection(plant_id: str, df: pd.DataFrame, db: Session):
@@ -204,6 +496,8 @@ def run_ds_detection(plant_id: str, df: pd.DataFrame, db: Session):
       missing_strings         disconnected string count (window-min rule)
       fault_status            NORMAL | CONFIRMED_DS
     """
+
+    plant_type = _get_plant_type(db, plant_id)
 
     # ── Validate required columns ─────────────────────────────────────────────
     required = {"timestamp", "inverter_id", "scb_id", "scb_current"}
@@ -239,7 +533,7 @@ def run_ds_detection(plant_id: str, df: pd.DataFrame, db: Session):
                     "SELECT timestamp, equipment_id, value "
                     "FROM raw_data_generic "
                     "WHERE plant_id = :p "
-                    "  AND equipment_level = 'scb' "
+                    "  AND LOWER(TRIM(equipment_level::text)) = 'scb' "
                     "  AND signal = 'dc_voltage' "
                     "  AND timestamp >= :f AND timestamp <= :t"
                 ),
@@ -359,23 +653,11 @@ def run_ds_detection(plant_id: str, df: pd.DataFrame, db: Session):
     if df.empty:
         return
 
-    # ── Step 4 — Irradiance / time-of-day gate ───────────────────────────────
-    # This is the first timestamp filter — only keep valid daytime irradiance window.
+    # ── Step 4 — Operating filter gate ────────────────────────────────────────
+    # Skip night/low irradiance, inverter-off, and zero-export/grid-breakdown
+    # windows before attempting DS detection.
     _scbs_pre_filter = set(df["scb_id"].unique())
-
-    if irr_map:
-        df["irradiance"] = pd.to_numeric(df["timestamp"].map(irr_map), errors="coerce")
-        df = df[
-            np.isfinite(df["irradiance"])
-            & (df["irradiance"] >= IRRADIANCE_MIN)
-            & (df["irradiance"] <= IRRADIANCE_MAX)
-        ].copy()
-    else:
-        t = df["timestamp"].dt.time
-        df = df[
-            (t >= pd.to_datetime("06:00:00").time())
-            & (t <= pd.to_datetime("19:00:00").time())
-        ].copy()
+    df = _apply_operating_filters(df, db, plant_id, from_ts_str, to_ts_str, irr_map)
 
     if df.empty:
         return
@@ -392,6 +674,12 @@ def run_ds_detection(plant_id: str, df: pd.DataFrame, db: Session):
     _scbs_after_outlier = set(df["scb_id"].unique())
     _outlier_removed    = _scbs_pre_filter - _scbs_after_outlier
 
+    if df.empty:
+        return
+
+    # ── Step 5b — Simple smoothing ────────────────────────────────────────────
+    df = _smooth_measurements(df)
+    df = df.dropna(subset=["scb_current"]).copy()
     if df.empty:
         return
 
@@ -472,16 +760,30 @@ def run_ds_detection(plant_id: str, df: pd.DataFrame, db: Session):
     db.commit()
 
     # ── Step 7 — Normalise ────────────────────────────────────────────────────
+    # In SCB plants this is current per string within an SCB.
+    # In Tiger / MPPT plants uploaded "SCBs" represent MPPT channels, so this is
+    # current per string within an MPPT and comparisons stay inside the inverter.
     df["per_string_current"] = df["scb_current"] / df["string_count"]
 
-    # ── Step 8 — Virtual reference string ────────────────────────────────────
-    ref_series = df.groupby(
-        ["timestamp", "inverter_id"], group_keys=False
-    ).apply(_virtual_reference_per_inverter)
-
-    ref_df = ref_series.reset_index()
-    ref_df.columns = ["timestamp", "inverter_id", "ref_current"]
-    df = df.merge(ref_df, on=["timestamp", "inverter_id"], how="left")
+    # ── Step 8 — Reference current inside each inverter ───────────────────────
+    # MPPT: compare normalized MPPT currents by median, not raw power, so unequal
+    # string counts do not become false DS.
+    # SCB: use the existing top-percentile virtual reference for central inverter
+    # SCB groups, but add voltage consistency in Step 9.
+    if plant_type == "MPPT":
+        # Use 75th-percentile rather than median so that co-faulty MPPTs (which
+        # pull the median down) do not suppress detection of the faulty channel.
+        ref_series = df.groupby(["timestamp", "inverter_id"])["per_string_current"].transform(
+            lambda s: float(np.nanpercentile(s.to_numpy(dtype=float), 75))
+        )
+        df["ref_current"] = ref_series
+    else:
+        ref_series = df.groupby(
+            ["timestamp", "inverter_id"], group_keys=False
+        ).apply(_virtual_reference_per_inverter)
+        ref_df = ref_series.reset_index()
+        ref_df.columns = ["timestamp", "inverter_id", "ref_current"]
+        df = df.merge(ref_df, on=["timestamp", "inverter_id"], how="left")
     df = df[np.isfinite(df["ref_current"]) & (df["ref_current"] > 0)].copy()
     if df.empty:
         return
@@ -489,13 +791,27 @@ def run_ds_detection(plant_id: str, df: pd.DataFrame, db: Session):
     # ── Step 9 — DS candidate detection ──────────────────────────────────────
     df["expected_scb_current"] = df["ref_current"] * df["string_count"]
     df["missing_current"]      = np.maximum(0.0, df["expected_scb_current"] - df["scb_current"])
-    df["candidate"]            = df["missing_current"] > df["ref_current"]
+    df["voltage_ok"]           = _voltage_ok_series(df, ["timestamp", "inverter_id"])
+    if plant_type == "MPPT":
+        # Same-inverter MPPT comparison after string-count normalization.
+        df["candidate"] = (
+            df["voltage_ok"]
+            & (df["per_string_current"] < (df["ref_current"] * DS_COMPARE_RATIO))
+        )
+    else:
+        # SCB central inverter logic: current loss of at least one string plus
+        # similar voltage to peers.
+        df["candidate"] = (
+            df["voltage_ok"]
+            & (df["missing_current"] >= df["ref_current"])
+            & (df["scb_current"] < df["expected_scb_current"])
+        )
     df["ds_count"]             = 0
 
     cand_mask = df["candidate"] & (df["ref_current"] > 0)
-    df.loc[cand_mask, "ds_count"] = np.floor(
+    df.loc[cand_mask, "ds_count"] = np.maximum(1, np.floor(
         df.loc[cand_mask, "missing_current"] / df.loc[cand_mask, "ref_current"]
-    ).astype(int)
+    ).astype(int))
     df.loc[df["ds_count"] < 0, "ds_count"] = 0
 
     # ── Step 10+11 — Persistence window + window-min + energy loss ────────────
@@ -545,7 +861,13 @@ def run_ds_detection(plant_id: str, df: pd.DataFrame, db: Session):
                 run_end += 1
 
             run_len = run_end - run_start
-            if run_len >= persistence_points:
+            # Wall-clock is the primary gate: the fault window must span at least
+            # PERSISTENCE_MINUTES of real time. Sample count is the fallback for
+            # edge cases where timestamp deltas are zero or data is irregular.
+            elapsed_sec = int(ts_epoch[run_end - 1]) - int(ts_epoch[run_start])
+            wc_confirmed = elapsed_sec >= PERSISTENCE_MINUTES * 60
+            sc_confirmed = run_len >= persistence_points
+            if wc_confirmed or (elapsed_sec <= 0 and sc_confirmed):
                 win_min = max(0, int(np.min(ds_arr[run_start:run_end])))
                 for j in range(run_start, run_end):
                     fault_flag[j] = 1
@@ -594,6 +916,18 @@ def run_ds_detection(plant_id: str, df: pd.DataFrame, db: Session):
     try:
         from engine.fault_episodes import rebuild_fault_episodes_for_scbs
         rebuild_fault_episodes_for_scbs(db, plant_id, set(scb_arr.tolist()))
+    except Exception:
+        pass
+
+    # Interval fault history (separate recovered/reappeared faults).
+    try:
+        _rebuild_fault_events_from_diagnostics(
+            db,
+            plant_id,
+            set(scb_arr.tolist()),
+            "mppt" if plant_type == "MPPT" else "scb",
+            resolution_minutes,
+        )
     except Exception:
         pass
 

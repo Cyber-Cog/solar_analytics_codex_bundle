@@ -321,9 +321,20 @@ async def solar_log_slow_requests(request: Request, call_next):
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
+_nextjs_url = os.getenv("SOLAR_NEXTJS_URL", "")
+_cors_origins = [
+    "http://localhost:5173",   # Vite dev
+    "http://localhost:3000",   # Next.js dev
+    "http://localhost:3001",
+]
+if _nextjs_url:
+    _cors_origins.append(_nextjs_url)
+# In production, SOLAR_NEXTJS_URL should be set to the actual Vercel/deployment URL.
+# The wildcard below is for easy dev/staging; restrict it in production via the env var.
+_cors_origins.append("*")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins     = ["http://localhost:5173", "http://localhost:3000", "*"],
+    allow_origins     = _cors_origins,
     allow_credentials = True,
     allow_methods     = ["*"],
     allow_headers     = ["*"],
@@ -374,7 +385,8 @@ async def static_cache_headers(request: Request, call_next):
 
 
 # Mount static files AFTER all API routes so /docs and /api/* still work.
-# We keep this enabled in serverless too, because Vercel Services mode can ship
-# the frontend files alongside the FastAPI service.
-if os.path.isdir(FRONTEND_DIR):
+# Set SOLAR_USE_NEXTJS_FRONTEND=1 to disable the legacy static frontend and
+# run the Next.js app (frontend-next/) as a standalone service on port 3000.
+_use_nextjs = os.getenv("SOLAR_USE_NEXTJS_FRONTEND", "0").strip() in {"1", "true", "yes"}
+if not _use_nextjs and os.path.isdir(FRONTEND_DIR):
     app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")

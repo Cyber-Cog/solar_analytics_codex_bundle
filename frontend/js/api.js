@@ -605,6 +605,7 @@ const Admin = {
   updateUser: (userId, data) => apiFetch(`/api/admin/users/${userId}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteUser: (userId) => apiFetch(`/api/admin/users/${userId}`, { method: 'DELETE' }),
   deletePlant: (plantId) => apiFetch(`/api/admin/plants/${encodeURIComponent(plantId)}`, { method: 'DELETE' }),
+  updatePlant: (plantId, data) => apiFetch(`/api/admin/plants/${encodeURIComponent(plantId)}`, { method: 'PUT', body: JSON.stringify(data || {}) }),
   updateSiteAppearance: (data) => apiFetch('/api/admin/site-appearance', { method: 'PUT', body: JSON.stringify(data) }),
   // ── Performance monitoring ──────────────────────────────────────────────
   perfOverview: () => apiFetch('/api/admin/perf/overview'),

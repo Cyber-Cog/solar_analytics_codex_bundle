@@ -1,14 +1,22 @@
 "use client";
 
 import { useState } from "react";
-import { signIn } from "next-auth/react";
+import { signIn, getSession } from "next-auth/react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Sun, Loader2, AlertCircle } from "lucide-react";
+
+function safeCallbackUrl(raw: string | null): string {
+  const fallback = "/dashboard";
+  if (!raw || !raw.startsWith("/")) return fallback;
+  // Never send users to NextAuth or API paths after login
+  if (raw.startsWith("/api/")) return fallback;
+  return raw;
+}
 
 export default function LoginPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const callbackUrl = searchParams.get("callbackUrl") || "/dashboard";
+  const callbackUrl = safeCallbackUrl(searchParams.get("callbackUrl"));
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -26,8 +34,17 @@ export default function LoginPage() {
         redirect: false,
       });
       if (result?.error) {
-        setError("Invalid email or password");
+        setError("Invalid email or password — check credentials and that NEXT_PUBLIC_API_URL points to your FastAPI URL.");
       } else {
+        // lib/api.ts uses Bearer from localStorage; sync JWT from the session
+        const session = await getSession();
+        const ext = session as { accessToken?: string; user?: Record<string, unknown> } | null;
+        if (ext?.accessToken) {
+          localStorage.setItem("solar_token", ext.accessToken);
+        }
+        if (session?.user) {
+          localStorage.setItem("solar_user", JSON.stringify(session.user));
+        }
         router.push(callbackUrl);
         router.refresh();
       }

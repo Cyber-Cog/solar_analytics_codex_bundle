@@ -1,6 +1,11 @@
 import { auth } from "@/auth";
 import { NextResponse } from "next/server";
 
+/**
+ * Next.js 16+ uses `proxy.ts` instead of `middleware.ts`.
+ * Exclude `/api` so NextAuth (`/api/auth/*`) and same-origin API rewrites are never
+ * short-circuited by an auth redirect (that was breaking credential sign-in).
+ */
 export default auth((req) => {
   const { pathname } = req.nextUrl;
   const isLoggedIn = !!req.auth;
@@ -22,5 +27,11 @@ export default auth((req) => {
 });
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|public).*)"],
+  matcher: [
+    /*
+     * Skip all /api (NextAuth + rewrites to FastAPI), static assets, images.
+     * See: https://nextjs.org/docs/app/api-reference/file-conventions/proxy#matcher
+     */
+    "/((?!api|_next/static|_next/image|favicon.ico|.*\\..*).*)",
+  ],
 };

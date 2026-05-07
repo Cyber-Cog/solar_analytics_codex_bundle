@@ -6,7 +6,19 @@ import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import type { User } from "next-auth";
 
+function backendBaseUrl(): string {
+  const u =
+    (process.env.AUTH_BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/, "");
+  if (!u && process.env.NODE_ENV === "production") {
+    console.error(
+      "[auth] Set NEXT_PUBLIC_API_URL (or AUTH_BACKEND_URL) to your FastAPI origin, e.g. https://your-api.vercel.app"
+    );
+  }
+  return u || "http://localhost:8000";
+}
+
 export const { auth, handlers, signIn, signOut } = NextAuth({
+  trustHost: true,
   providers: [
     Credentials({
       credentials: {
@@ -16,8 +28,7 @@ export const { auth, handlers, signIn, signOut } = NextAuth({
       async authorize(credentials): Promise<User | null> {
         const { email, password } = credentials as { email: string; password: string };
         try {
-          const apiBase =
-            process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+          const apiBase = backendBaseUrl();
           const res = await fetch(`${apiBase}/auth/login`, {
             method:  "POST",
             headers: { "Content-Type": "application/json" },
@@ -33,7 +44,8 @@ export const { auth, handlers, signIn, signOut } = NextAuth({
             isAdmin:        data.user.is_admin,
             allowedPlants:  data.user.allowed_plants,
           } as User;
-        } catch {
+        } catch (e) {
+          console.error("[auth] /auth/login fetch failed:", e);
           return null;
         }
       },
@@ -60,5 +72,5 @@ export const { auth, handlers, signIn, signOut } = NextAuth({
     error:  "/login",
   },
   session: { strategy: "jwt", maxAge: 8 * 60 * 60 },
-  secret: process.env.NEXTAUTH_SECRET,
+  secret: process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET,
 });

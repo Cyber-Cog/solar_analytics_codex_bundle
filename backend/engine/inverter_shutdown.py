@@ -4,8 +4,10 @@ Rule:
   shutdown = (ac_power == 0) AND (irradiance > threshold W/m², default 10)
 
 Energy loss (kWh): at each timestamp, expected AC (kW) = median of inverters in the
-top quartile (>= 75th percentile) of AC among producing peers; for shutdown samples,
-incremental loss = expected_kw × Δt (per-inverter cadence, same basis as hours).
+top quartile (>= 75th percentile) of AC among producing peers; if that is ~0 but peers
+are producing, fall back to positive p75 then plant max AC at that timestamp. Timestamps
+are aligned (UTC-naive, second resolution) so irradiance join and expected merge cannot
+silently zero out. For shutdown samples, incremental loss = expected_kw × Δt (per-inverter).
 """
 
 from __future__ import annotations
@@ -22,6 +24,16 @@ from sqlalchemy.orm import Session
 
 IS_IRRADIANCE_MIN = float(os.getenv("IS_IRRADIANCE_MIN", "10"))
 IS_AC_ZERO_TOL = float(os.getenv("IS_AC_ZERO_TOL", "0.01"))
+
+
+def _align_time_column(s: pd.Series) -> pd.Series:
+    """
+    UTC-naive timestamps floored to whole seconds so AC, irradiance, and merge keys
+    line up across drivers (tz-aware vs naive) and str formatting differences.
+    """
+    t = pd.to_datetime(s, errors="coerce", utc=True)
+    t = t.dt.tz_convert("UTC").dt.tz_localize(None)
+    return t.dt.floor("s")
 
 
 def _normalize_date_str(v: str) -> str:
@@ -53,7 +65,7 @@ def _pick_irradiance(df_irr: pd.DataFrame) -> dict:
     prio = {"irradiance": 0, "gti": 1, "ghi": 2}
     df_irr["prio"] = df_irr["signal"].map(prio).fillna(99)
     df_irr = df_irr.sort_values(["timestamp", "prio"]).drop_duplicates(["timestamp"], keep="first")
-    return dict(zip(df_irr["timestamp"].astype(str), df_irr["irradiance"]))
+    return dict(zip(df_irr["timestamp"], df_irr["irradiance"]))
 
 
 def _expected_kw_top_quarter_median(vals: np.ndarray) -> float:
@@ -100,7 +112,7 @@ def run_inverter_shutdown(
         return [], []
 
     df = pd.DataFrame(ac_rows, columns=["timestamp", "inverter_id", "ac_kw"])
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df["timestamp"] = _align_time_column(df["timestamp"])
     df["ac_kw"] = pd.to_numeric(df["ac_kw"], errors="coerce")
     df = df.dropna(subset=["timestamp", "inverter_id", "ac_kw"]).copy()
     if df.empty:
@@ -122,14 +134,14 @@ def run_inverter_shutdown(
         return [], []
 
     df_irr = pd.DataFrame(irr_rows, columns=["timestamp", "signal", "irradiance"])
-    df_irr["timestamp"] = pd.to_datetime(df_irr["timestamp"], errors="coerce")
+    df_irr["timestamp"] = _align_time_column(df_irr["timestamp"])
     df_irr["irradiance"] = pd.to_numeric(df_irr["irradiance"], errors="coerce")
     df_irr = df_irr.dropna(subset=["timestamp", "irradiance"]).copy()
     if df_irr.empty:
         return [], []
 
     irr_map = _pick_irradiance(df_irr)
-    df["irradiance"] = df["timestamp"].astype(str).map(irr_map)
+    df["irradiance"] = df["timestamp"].map(irr_map)
     df["irradiance"] = pd.to_numeric(df["irradiance"], errors="coerce")
     df = df.dropna(subset=["irradiance"]).copy()
     if df.empty:
@@ -177,6 +189,15 @@ def run_inverter_shutdown(
     df["expected_ac_kw"] = np.where(
         (df["expected_ac_kw"] <= IS_AC_ZERO_TOL) & (plant_pos_p75 > IS_AC_ZERO_TOL),
         plant_pos_p75,
+        df["expected_ac_kw"],
+    )
+
+    # If peer median is still ~0 but any inverter is exporting at this timestamp, use plant max AC
+    # (covers merge/join gaps and heavily skewed all-zero readings with a single producer).
+    plant_max_kw = df.groupby("timestamp", sort=False)["ac_kw"].transform("max")
+    df["expected_ac_kw"] = np.where(
+        (df["expected_ac_kw"] <= IS_AC_ZERO_TOL) & (plant_max_kw > IS_AC_ZERO_TOL),
+        plant_max_kw,
         df["expected_ac_kw"],
     )
 

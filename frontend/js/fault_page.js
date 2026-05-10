@@ -1164,7 +1164,7 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
 
     subView === 'is' && h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16 } },
       isLoading && h('div', { style: { padding: 24, textAlign: 'center', color: 'var(--text-soft)' } }, h(Spinner), ' Loading inverter shutdown data…'),
-      !isLoading && isSummary && h(Card, { title: 'Inverter Shutdown Insights (AC=0 and Irradiance>5 W/m²)' },
+      !isLoading && isSummary && h(Card, { title: 'Inverter Shutdown Insights (AC=0 and Irradiance>10 W/m²)' },
         h('div', { className: 'kpi-grid', style: { gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' } },
           h(KpiCard, { label: 'Affected Inverters', value: isSummary.active_shutdown_inverters ?? 0, unit: '', color: 'var(--solar-orange)' }),
           h(KpiCard, { label: 'Total Shutdown Hours', value: (isSummary.total_shutdown_hours ?? 0).toFixed(2), unit: 'h', color: '#EF4444' }),
@@ -1207,7 +1207,7 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
 
     subView === 'gb' && h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16 } },
       gbLoading && h('div', { style: { padding: 24, textAlign: 'center', color: 'var(--text-soft)' } }, h(Spinner), ' Loading grid breakdown data...'),
-      !gbLoading && gbSummary && h(Card, { title: 'Grid Breakdown Insights (All Inverters AC=0 and Irradiance>5 W/m²)' },
+      !gbLoading && gbSummary && h(Card, { title: 'Grid Breakdown Insights (All Inverters AC=0 and Irradiance>10 W/m²)' },
         h('div', { className: 'kpi-grid', style: { gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' } },
           h(KpiCard, { label: 'Grid Breakdown Events', value: gbSummary.active_grid_events ?? 0, unit: '', color: 'var(--solar-orange)' }),
           h(KpiCard, { label: 'Total Breakdown Hours', value: (gbSummary.total_grid_breakdown_hours ?? 0).toFixed(2), unit: 'h', color: '#EF4444' }),
@@ -2397,7 +2397,7 @@ const ISInvestigateModal = ({ inverterId, plantId, dateFrom, dateTo, onClose }) 
         h('button', { className: 'btn btn-outline', onClick: onClose }, 'Close')
       ),
       h('div', { style: { color: 'var(--text-muted)', fontSize: 13, marginBottom: 12 } },
-        'Rule: AC Power = 0 and Irradiance > 5 W/m². Red shaded regions are detected shutdown windows.'
+        'Rule: AC Power = 0 and Irradiance > 10 W/m². Red shaded regions are detected shutdown windows.'
       ),
       loading && h('div', { style: { padding: 40, textAlign: 'center' } }, h(Spinner), ' Loading…'),
       !loading && chartData.length === 0 && h('div', { className: 'empty-state', style: { minHeight: 180 } }, 'No timeline data for selected inverter/range.'),
@@ -2544,7 +2544,7 @@ const GBInvestigateModal = ({ eventId, plantId, dateFrom, dateTo, onClose }) => 
         h('button', { className: 'btn btn-outline', onClick: onClose }, 'Close')
       ),
       h('div', { style: { color: 'var(--text-muted)', fontSize: 13, marginBottom: 12 } },
-        'Rule: all inverters AC Power = 0 and Irradiance > 5 W/m². Red shaded regions are detected grid breakdown windows.'
+        'Rule: all inverters AC Power = 0 and Irradiance > 10 W/m². Red shaded regions are detected grid breakdown windows.'
       ),
       loading && h('div', { style: { padding: 40, textAlign: 'center' } }, h(Spinner), ' Loading...'),
       !loading && chartData.length === 0 && h('div', { className: 'empty-state', style: { minHeight: 180 } }, 'No timeline data for selected range.'),

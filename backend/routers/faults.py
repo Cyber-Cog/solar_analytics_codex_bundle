@@ -58,17 +58,18 @@ from snap_perf import record_compute_ms, record_snapshot
 router = APIRouter(prefix="/api/faults", tags=["Faults"])
 
 # Bump when DS summary JSON semantics change so DB snapshots are recomputed even if still "fresh" vs raw_data_stats.
-DS_SUMMARY_PAYLOAD_VERSION = 3
-UNIFIED_FAULT_PAYLOAD_VERSION = 2
+DS_SUMMARY_PAYLOAD_VERSION = 4
+UNIFIED_FAULT_PAYLOAD_VERSION = 3
+GB_TAB_PAYLOAD_VERSION = 2
 DS_MIN_CONFIRMED_POINTS = int(os.getenv("DS_MIN_CONFIRMED_POINTS", "3"))
 
 _MEM_PL_PAGE = "faults_pl_page_v2"
 _MEM_IS_TAB = "faults_is_tab_v4"
-_MEM_GB_TAB = "faults_gb_tab_v3_loss"
+_MEM_GB_TAB = "faults_gb_tab_v4_pr_loss"
 _MEM_COMM_TAB = "faults_comm_tab_v2"
 _MEM_INV_EFF_AGG = "faults_inv_eff_agg_v3"
 _MEM_CD_TAB = "faults_cd_tab_v3_fast"
-_MEM_RUNTIME_TABS_BUNDLE = "faults_runtime_tabs_bundle_v9_gb_loss"
+_MEM_RUNTIME_TABS_BUNDLE = "faults_runtime_tabs_bundle_v10_gb_pr_loss"
 
 def _compute_inv_eff_aggregate(
     db: Session, plant_id: str, _from: str, _to: str
@@ -294,7 +295,7 @@ def _compute_gb_tab(db: Session, plant_id: str, _from: str, _to: str) -> dict:
         ],
     }
     data = [e for e in events if (e.get("breakdown_points") or 0) > 0]
-    return {"summary": summary, "events": {"data": data}}
+    return {"payload_version": GB_TAB_PAYLOAD_VERSION, "summary": summary, "events": {"data": data}}
 
 
 def _gb_tab_with_cache(db: Session, plant_id: str, _from: str, _to: str) -> dict:
@@ -302,7 +303,7 @@ def _gb_tab_with_cache(db: Session, plant_id: str, _from: str, _to: str) -> dict
     if hit is not None:
         return hit
     snap = try_snapshot_payload(db, plant_id, _from, _to, KIND_GB_TAB)
-    if snap is not None and (snap.get("summary") or {}).get("total_grid_breakdown_energy_loss_kwh") is not None:
+    if snap is not None and int(snap.get("payload_version") or 0) >= GB_TAB_PAYLOAD_VERSION:
         _dc_set(_MEM_GB_TAB, plant_id, _from, _to, snap)
         return snap
     out = _compute_gb_tab(db, plant_id, _from, _to)
@@ -1278,7 +1279,7 @@ def get_gb_summary(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Summary for grid breakdown: all inverters AC=0 and irradiance > 5 W/m²."""
+    """Summary for grid breakdown: all inverters AC=0 and irradiance > 10 W/m²."""
     _from, _to = _fault_date_range(date_from, date_to)
     return _gb_tab_with_cache(db, plant_id, _from, _to)["summary"]
 

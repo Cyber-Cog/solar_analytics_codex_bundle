@@ -21,7 +21,7 @@ Pipeline order:
   Step 7  — Normalise: per_string_current = scb_current / N_strings
   Step 8  — Virtual reference string (per inverter + timestamp):
                top TOP_PERCENTILE SCBs → median(per_string_current) = ref_current
-  Step 9  — DS candidate: missing_current = max(0, ref×N − actual), candidate if > ref
+  Step 9  — DS candidate: missing_current = max(0, ref×N − actual), candidate if persistent loss is near one string
   Step 10 — Persistence window (≥ PERSISTENCE_POINTS consecutive): CONFIRMED_DS
   Step 11 — Window-min rule for missing_strings; resolution-aware energy loss.
   Step 12 — Bulk insert to fault_diagnostics.
@@ -70,6 +70,7 @@ DS_VOLTAGE_TOL_PCT = float(os.getenv("DS_VOLTAGE_TOL_PCT", "10"))
 DS_ROLLING_MEDIAN_WINDOW = int(os.getenv("DS_ROLLING_MEDIAN_WINDOW", "5"))
 DS_ZERO_EXPORT_KW_MIN = float(os.getenv("DS_ZERO_EXPORT_KW_MIN", "0.5"))
 DS_ZERO_EXPORT_MEDIAN_RATIO = float(os.getenv("DS_ZERO_EXPORT_MEDIAN_RATIO", "0.02"))
+DS_MISSING_STRING_TOLERANCE = float(os.getenv("DS_MISSING_STRING_TOLERANCE", "0.85"))
 # MPPT-only: lift reference toward max peer per-string current so one disconnected MPPT
 # (no clipping) is not masked when siblings clip (ref from p75 alone can sit too low).
 DS_MPPT_REF_FROM_MAX_PEER_FRAC = float(os.getenv("DS_MPPT_REF_FROM_MAX_PEER_FRAC", "0.98"))
@@ -795,6 +796,11 @@ def run_ds_detection(plant_id: str, df: pd.DataFrame, db: Session):
     # ── Step 9 — DS candidate detection ──────────────────────────────────────
     df["expected_scb_current"] = df["ref_current"] * df["string_count"]
     df["missing_current"]      = np.maximum(0.0, df["expected_scb_current"] - df["scb_current"])
+    df["missing_string_ratio"] = np.where(
+        df["ref_current"] > 0,
+        df["missing_current"] / df["ref_current"],
+        0.0,
+    )
     df["voltage_ok"]           = _voltage_ok_series(df, ["timestamp", "inverter_id"])
     if plant_type == "MPPT":
         # Same-inverter MPPT comparison after string-count normalization.
@@ -803,19 +809,22 @@ def run_ds_detection(plant_id: str, df: pd.DataFrame, db: Session):
             & (df["per_string_current"] < (df["ref_current"] * DS_COMPARE_RATIO))
         )
     else:
-        # SCB central inverter logic: current loss of at least one string plus
-        # similar voltage to peers.
+        # SCB central inverter logic: persistent near-one-string current loss
+        # plus similar voltage to peers. The 0.85 default tolerance catches
+        # cases like 12 A vs 6.4 A on a two-string SCB without changing the
+        # persistence gate below.
         df["candidate"] = (
             df["voltage_ok"]
-            & (df["missing_current"] >= df["ref_current"])
+            & (df["missing_string_ratio"] >= DS_MISSING_STRING_TOLERANCE)
             & (df["scb_current"] < df["expected_scb_current"])
         )
     df["ds_count"]             = 0
 
     cand_mask = df["candidate"] & (df["ref_current"] > 0)
-    df.loc[cand_mask, "ds_count"] = np.maximum(1, np.floor(
-        df.loc[cand_mask, "missing_current"] / df.loc[cand_mask, "ref_current"]
-    ).astype(int))
+    df.loc[cand_mask, "ds_count"] = np.maximum(
+        1,
+        np.floor(df.loc[cand_mask, "missing_string_ratio"] + (1.0 - DS_MISSING_STRING_TOLERANCE)).astype(int),
+    )
     df.loc[df["ds_count"] < 0, "ds_count"] = 0
 
     # ── Step 10+11 — Persistence window + window-min + energy loss ────────────

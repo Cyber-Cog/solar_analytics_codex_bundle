@@ -7,7 +7,7 @@ inverter performance table, active power vs GTI, and loss waterfall.
 All queries run against raw_data_generic and plant tables.
 """
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from typing import Any, Dict, List, Optional
@@ -50,6 +50,27 @@ from dashboard_mv_sql import (
 import time
 
 router = APIRouter(prefix="/api/dashboard", tags=["Dashboard"])
+
+
+def _ensure_user_plant_access(db: Session, user: User, plant_id: str) -> None:
+    """Match list_plants visibility: admin sees all; else allowed_plants CSV or owner_id."""
+    if getattr(user, "is_admin", False):
+        return
+    plant = db.query(Plant).filter(Plant.plant_id == plant_id).first()
+    if not plant:
+        raise HTTPException(status_code=404, detail=f"Plant '{plant_id}' not found")
+    ap = (user.allowed_plants or "").strip()
+    if ap:
+        if ap == "*":
+            return
+        allowed_ids = [x.strip() for x in ap.split(",") if x.strip()]
+        if plant_id in allowed_ids:
+            return
+        raise HTTPException(status_code=403, detail="Not allowed to access this plant")
+    if plant.owner_id is not None and plant.owner_id == user.id:
+        return
+    raise HTTPException(status_code=403, detail="Not allowed to access this plant")
+
 
 # WMS insolation from summed irradiance (W/m²): assumes **1-minute** samples.
 # kWh/m² = Σ P_W/m² × (1/60 h) / 1000 = Σ P / 60000
@@ -498,6 +519,7 @@ def station_details(
     current_user: User = Depends(get_current_user),
 ):
     """Return static plant metadata for the Station Details card."""
+    _ensure_user_plant_access(db, current_user, plant_id)
     cached = cache_get("station_v1", plant_id, "", "")
     if cached is not None:
         return StationDetails(**cached)
@@ -551,6 +573,7 @@ def energy_generation(
     current_user: User = Depends(get_current_user),
 ):
     """Daily actual energy generation compared to a simple capacity-based target."""
+    _ensure_user_plant_access(db, current_user, plant_id)
     _from, _to = _default_range(date_from, date_to)
     cached = cache_get("energy_v1", plant_id, _from, _to)
     if cached is not None:
@@ -602,6 +625,7 @@ def weather_data(
     current_user: User = Depends(get_current_user),
 ):
     """Return WMS weather time-series for the selected plant."""
+    _ensure_user_plant_access(db, current_user, plant_id)
     _from, _to = _default_range(date_from, date_to)
     cached = cache_get("weather_v1", plant_id, _from, _to)
     if cached is not None:
@@ -669,6 +693,7 @@ def kpis(
     current_user: User = Depends(get_current_user),
 ):
     """Return aggregate KPI values for the selected date range."""
+    _ensure_user_plant_access(db, current_user, plant_id)
     _from, _to  = _default_range(date_from, date_to)
     cached = cache_get("kpis_v1", plant_id, _from, _to)
     if cached is not None:
@@ -733,6 +758,7 @@ def wms_kpis(
     current_user: User = Depends(get_current_user),
 ):
     """WMS KPIs: insolation kWh/m² (Σ W/m² / 60000 for 1-min data), mean irradiance W/m², temps, wind."""
+    _ensure_user_plant_access(db, current_user, plant_id)
     _from, _to = _default_range(date_from, date_to)
     cached = cache_get("wmskpis_v1", plant_id, _from, _to)
     if cached is not None:
@@ -755,6 +781,7 @@ def inverter_performance(
     current_user: User = Depends(get_current_user),
 ):
     """Return average DC/AC power per inverter for the date range (+ PLF)."""
+    _ensure_user_plant_access(db, current_user, plant_id)
     _from, _to = _default_range(date_from, date_to)
     cached = cache_get("invperf_v1", plant_id, _from, _to)
     if cached is not None:
@@ -812,6 +839,7 @@ def power_vs_gti(
     current_user: User = Depends(get_current_user),
 ):
     """Return time-series of total active power and GTI for charting (full selected date span)."""
+    _ensure_user_plant_access(db, current_user, plant_id)
     _from, _to = _default_range(date_from, date_to)
     start_time = time.time()
     lim = _power_vs_gti_row_limit(_from, _to)
@@ -908,12 +936,14 @@ def dashboard_target_generation(
     plant_id: str = Query(...),
     date_from: str = Query(default=None),
     date_to: str = Query(default=None),
+    db: Session = Depends(get_read_db),
     current_user: User = Depends(get_current_user),
 ):
     """
     Expected vs actual (target gen) for dashboard only — use after /bundle?include_target_generation=0
     for faster first paint. Same payload the full bundle would embed under `target_generation`.
     """
+    _ensure_user_plant_access(db, current_user, plant_id)
     _from, _to = _default_range(date_from, date_to)
     return _fetch_target_generation_payload(plant_id, _from, _to)
 
@@ -934,6 +964,7 @@ def dashboard_bundle(
     Return station, kpis, wms, energy, inverter_performance, power_vs_gti in one response.
     Cached per (plant_id, date range). Lite variant (no target gen) uses a separate cache key.
     """
+    _ensure_user_plant_access(db, current_user, plant_id)
     _from, _to = _default_range(date_from, date_to)
     cache_prefix = "bundle_v9" if include_target_generation else "bundle_v9_lite"
     cached = cache_get(cache_prefix, plant_id, _from, _to)

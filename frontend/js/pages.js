@@ -137,6 +137,17 @@ window.DashboardPage = ({ plantId, dateFrom, dateTo, onNavigate }) => {
   const debounceFirstPlant = useRef(true);
 
   useEffect(() => {
+    setStation(null);
+    setKpis(null);
+    setWms(null);
+    setEnergy([]);
+    setInvTable([]);
+    setPowerGti([]);
+    setTargetGeneration(null);
+    setNoData(false);
+  }, [plantId]);
+
+  useEffect(() => {
     debounceFirstPlant.current = true;
     setFetchRange({ from: dateFrom, to: dateTo });
   }, [plantId]);

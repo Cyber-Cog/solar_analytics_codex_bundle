@@ -508,7 +508,13 @@ function App() {
   const handleToggleSidebar = useCallback(() => setSidebarOpen(v => !v), []);
   const handlePageChange = useCallback((p) => { window.location.hash = PAGE_TO_HASH[p] || 'dashboard'; }, []);
   const handleNavigateFaultSub = useCallback((s) => { window.location.hash = `fault-diagnostics/${s}`; }, []);
-  const handleLogout = () => { window.SolarAPI.clearToken(); setUser(null); setAuthed(false); };
+  const handleLogout = () => {
+    window.SolarAPI.clearToken();
+    try { localStorage.removeItem(PLANT_STORAGE_KEY); } catch (e) { /* noop */ }
+    setPlantId('');
+    setUser(null);
+    setAuthed(false);
+  };
 
   const handlePlantCreated = useCallback((created) => {
     if (!created || !created.plant_id) {
@@ -558,7 +564,23 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (authed) window.SolarAPI.Plants.list().then(ps => { setPlants(ps); if (ps.length && !plantId) setPlantId(ps[0].plant_id); });
+    if (!authed) return;
+    let cancelled = false;
+    window.SolarAPI.Plants.list()
+      .then((ps) => {
+        if (cancelled || !Array.isArray(ps)) return;
+        setPlants(ps);
+        if (!ps.length) return;
+        const ids = new Set(ps.map((p) => p && p.plant_id).filter(Boolean));
+        setPlantId((current) => {
+          if (current && ids.has(current)) return current;
+          const fb = ps[0].plant_id;
+          try { localStorage.setItem(PLANT_STORAGE_KEY, fb); } catch (e) { /* noop */ }
+          return fb;
+        });
+      })
+      .catch((e) => console.warn('Plants.list failed', e));
+    return () => { cancelled = true; };
   }, [authed]);
 
   useEffect(() => {

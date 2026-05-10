@@ -586,6 +586,13 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
       csvValue: (row) => row.active_since || '',
     },
     {
+      key: 'last_seen',
+      label: 'Last Seen',
+      sortValue: (row) => row.last_seen || row.timestamp || '',
+      render: (row) => row.last_seen || row.timestamp || '—',
+      csvValue: (row) => row.last_seen || row.timestamp || '',
+    },
+    {
       key: 'recurring_days',
       label: 'Recurring Days',
       sortValue: (row) => row.recurring_days ?? 0,
@@ -1203,7 +1210,8 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
       !gbLoading && gbSummary && h(Card, { title: 'Grid Breakdown Insights (All Inverters AC=0 and Irradiance>5 W/m²)' },
         h('div', { className: 'kpi-grid', style: { gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' } },
           h(KpiCard, { label: 'Grid Breakdown Events', value: gbSummary.active_grid_events ?? 0, unit: '', color: 'var(--solar-orange)' }),
-          h(KpiCard, { label: 'Total Breakdown Hours', value: (gbSummary.total_grid_breakdown_hours ?? 0).toFixed(2), unit: 'h', color: '#EF4444' })
+          h(KpiCard, { label: 'Total Breakdown Hours', value: (gbSummary.total_grid_breakdown_hours ?? 0).toFixed(2), unit: 'h', color: '#EF4444' }),
+          h(KpiCard, { label: 'Total energy loss', value: (gbSummary.total_grid_breakdown_energy_loss_kwh ?? 0).toFixed(1), unit: 'kWh', color: '#f59e0b' })
         )
       ),
       !gbLoading && h(Card, { title: `Grid Breakdown Events (${gbEvents.length})` },
@@ -1212,6 +1220,7 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
             { key: 'event_id', label: 'Event', render: (row) => h('strong', null, row.event_id), csvValue: (row) => row.event_id },
             { key: 'breakdown_points', label: 'Breakdown Points', sortValue: (row) => row.breakdown_points ?? -Infinity, render: (row) => Number(row.breakdown_points || 0), csvValue: (row) => Number(row.breakdown_points || 0) },
             { key: 'breakdown_hours', label: 'Breakdown Hours', sortValue: (row) => row.breakdown_hours ?? -Infinity, render: (row) => Number(row.breakdown_hours || 0).toFixed(3), csvValue: (row) => Number(row.breakdown_hours || 0).toFixed(3) },
+            { key: 'total_grid_breakdown_energy_loss_kwh', label: 'Energy loss (kWh)', sortValue: (row) => row.total_grid_breakdown_energy_loss_kwh ?? -Infinity, render: (row) => Number(row.total_grid_breakdown_energy_loss_kwh || 0).toFixed(2), csvValue: (row) => Number(row.total_grid_breakdown_energy_loss_kwh || 0).toFixed(2) },
             { key: 'last_seen_breakdown', label: 'Last Seen', csvValue: (row) => row.last_seen_breakdown || '' },
             { key: 'investigation_window', label: 'Investigation Window', render: (row) => {
               const s = row.investigation_window_start || '';
@@ -1228,7 +1237,7 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
           emptyMessage: 'No grid breakdown detected for the selected range.',
           filename: `grid_breakdown_${plantId || 'plant'}_${dateFrom}_${dateTo}.csv`,
           maxHeight: 420,
-          initialSortKey: 'breakdown_hours',
+          initialSortKey: 'total_grid_breakdown_energy_loss_kwh',
           initialSortDir: 'desc',
         })
       ),

@@ -58,15 +58,17 @@ from snap_perf import record_compute_ms, record_snapshot
 router = APIRouter(prefix="/api/faults", tags=["Faults"])
 
 # Bump when DS summary JSON semantics change so DB snapshots are recomputed even if still "fresh" vs raw_data_stats.
-DS_SUMMARY_PAYLOAD_VERSION = 2
+DS_SUMMARY_PAYLOAD_VERSION = 3
+UNIFIED_FAULT_PAYLOAD_VERSION = 2
+DS_MIN_CONFIRMED_POINTS = int(os.getenv("DS_MIN_CONFIRMED_POINTS", "3"))
 
 _MEM_PL_PAGE = "faults_pl_page_v2"
 _MEM_IS_TAB = "faults_is_tab_v4"
-_MEM_GB_TAB = "faults_gb_tab_v2"
+_MEM_GB_TAB = "faults_gb_tab_v3_loss"
 _MEM_COMM_TAB = "faults_comm_tab_v2"
 _MEM_INV_EFF_AGG = "faults_inv_eff_agg_v3"
 _MEM_CD_TAB = "faults_cd_tab_v3_fast"
-_MEM_RUNTIME_TABS_BUNDLE = "faults_runtime_tabs_bundle_v8"
+_MEM_RUNTIME_TABS_BUNDLE = "faults_runtime_tabs_bundle_v9_gb_loss"
 
 def _compute_inv_eff_aggregate(
     db: Session, plant_id: str, _from: str, _to: str
@@ -276,14 +278,17 @@ def _compute_gb_tab(db: Session, plant_id: str, _from: str, _to: str) -> dict:
     events, _ = run_grid_breakdown(db, plant_id, _from, _to)
     active = [e for e in events if (e.get("breakdown_points") or 0) > 0]
     total_hours = sum(float(e.get("breakdown_hours") or 0) for e in active)
+    total_loss_kwh = sum(float(e.get("total_grid_breakdown_energy_loss_kwh") or 0) for e in active)
     summary = {
         "active_grid_events": len(active),
         "total_grid_breakdown_hours": round(total_hours, 3),
+        "total_grid_breakdown_energy_loss_kwh": round(total_loss_kwh, 2),
         "events": [
             {
                 "event_id": e["event_id"],
                 "breakdown_points": e.get("breakdown_points", 0),
                 "breakdown_hours": e.get("breakdown_hours", 0),
+                "total_grid_breakdown_energy_loss_kwh": e.get("total_grid_breakdown_energy_loss_kwh", 0),
             }
             for e in active
         ],
@@ -297,7 +302,7 @@ def _gb_tab_with_cache(db: Session, plant_id: str, _from: str, _to: str) -> dict
     if hit is not None:
         return hit
     snap = try_snapshot_payload(db, plant_id, _from, _to, KIND_GB_TAB)
-    if snap is not None:
+    if snap is not None and (snap.get("summary") or {}).get("total_grid_breakdown_energy_loss_kwh") is not None:
         _dc_set(_MEM_GB_TAB, plant_id, _from, _to, snap)
         return snap
     out = _compute_gb_tab(db, plant_id, _from, _to)
@@ -535,14 +540,14 @@ def _min_disconnected_strings(session: Session, plant_id: str, date_from: Option
 
 def _active_disconnected_strings_in_range(session: Session, plant_id: str, date_from: Optional[str], date_to: Optional[str]) -> dict:
     """
-    SCBs where **every** timestep the DS engine materialised for that SCB in the window
-    is CONFIRMED_DS.
+    SCBs where the DS engine saw a persistent confirmed string disconnect in the window.
 
     `fault_diagnostics` rows for (plant_id, scb_id, range) are exactly the timestamps
     that passed `run_ds_detection` preprocessing (architecture, spare exclusion, leakage /
-    operating / outlier / constant filters, etc.) and received a diagnostic row. This
-    query requires that **all** of those rows are `CONFIRMED_DS` (no in-range NORMAL mixed
-    with CONFIRMED). `MAX(missing_strings) > 0` keeps only cases with a real disconnect
+    operating / outlier / constant filters, etc.) and received a diagnostic row. A single
+    blip or two isolated confirmed rows should not become an active DS fault, so this
+    requires at least `DS_MIN_CONFIRMED_POINTS` confirmed samples and no in-range NORMAL
+    rows for that SCB. `MAX(missing_strings) > 0` keeps only cases with a real disconnect
     count at some point in the window (min_ms is still the usual window-min for display).
 
     Row shape: scb_id -> {"min_ms": int, "first_ts": str, "last_ts": str}
@@ -564,10 +569,11 @@ def _active_disconnected_strings_in_range(session: Session, plant_id: str, date_
         GROUP BY scb_id
         HAVING COUNT(*) > 0
           AND SUM(CASE WHEN fault_status = 'CONFIRMED_DS' THEN 1 ELSE 0 END) = COUNT(*)
+          AND COUNT(*) >= :min_points
           AND MAX(CAST(COALESCE(missing_strings, 0) AS INTEGER)) > 0
     """)
     try:
-        rows = session.execute(sql, {"p": plant_id, "f": f_ts, "t": t_ts}).fetchall()
+        rows = session.execute(sql, {"p": plant_id, "f": f_ts, "t": t_ts, "min_points": DS_MIN_CONFIRMED_POINTS}).fetchall()
         out = {}
         for r in rows:
             if r[0] is None or r[1] is None:
@@ -765,22 +771,34 @@ def build_ds_summary_dict(
     top_scbs = []
     daily_loss_mwh = None
     if energy_available:
-        daily_loss = db.query(func.sum(FaultDiagnostics.energy_loss_kwh)).filter(
-            FaultDiagnostics.plant_id == plant_id,
-            FaultDiagnostics.timestamp.like(f"{latest_date}%")
-        ).scalar() or 0.0
-        top_scbs_query = db.query(
-            FaultDiagnostics.scb_id,
-            func.sum(FaultDiagnostics.energy_loss_kwh).label("total_loss")
-        ).filter(
-            FaultDiagnostics.plant_id == plant_id,
-            FaultDiagnostics.timestamp.like(f"{latest_date}%")
-        ).group_by(FaultDiagnostics.scb_id).order_by(func.sum(FaultDiagnostics.energy_loss_kwh).desc()).limit(5).all()
-        top_scbs = [
-            {"scb_id": r[0], "loss_kwh": round(r[1], 2), "loss_mwh": round((r[1] or 0) / 1000, 3)}
-            for r in top_scbs_query
-            if r[1] > 0 and r[0] not in spare_scbs and r[0] in set(active_scbs)
-        ]
+        if active_scbs:
+            latest_day_start = f"{latest_date} 00:00:00"
+            latest_day_end = f"{latest_date} 23:59:59"
+            daily_loss = db.query(func.sum(FaultDiagnostics.energy_loss_kwh)).filter(
+                FaultDiagnostics.plant_id == plant_id,
+                FaultDiagnostics.scb_id.in_(active_scbs),
+                FaultDiagnostics.fault_status == "CONFIRMED_DS",
+                FaultDiagnostics.timestamp >= latest_day_start,
+                FaultDiagnostics.timestamp <= latest_day_end,
+            ).scalar() or 0.0
+            top_scbs_query = db.query(
+                FaultDiagnostics.scb_id,
+                func.sum(FaultDiagnostics.energy_loss_kwh).label("total_loss")
+            ).filter(
+                FaultDiagnostics.plant_id == plant_id,
+                FaultDiagnostics.scb_id.in_(active_scbs),
+                FaultDiagnostics.fault_status == "CONFIRMED_DS",
+                FaultDiagnostics.timestamp >= latest_day_start,
+                FaultDiagnostics.timestamp <= latest_day_end,
+            ).group_by(FaultDiagnostics.scb_id).order_by(func.sum(FaultDiagnostics.energy_loss_kwh).desc()).limit(5).all()
+            top_scbs = [
+                {"scb_id": r[0], "loss_kwh": round(r[1], 2), "loss_mwh": round((r[1] or 0) / 1000, 3)}
+                for r in top_scbs_query
+                if r[1] > 0
+            ]
+        else:
+            daily_loss = 0.0
+            top_scbs = []
         daily_loss_mwh = round(daily_loss / 1000, 3) if daily_loss else 0
 
     f_ts = f"{date_from} 00:00:00" if date_from else None
@@ -794,7 +812,9 @@ def build_ds_summary_dict(
         es_where += " AND timestamp <= :t"
         es_params["t"] = t_ts
     daily_energy_series = []
-    if energy_available:
+    if energy_available and active_scbs:
+        es_where += " AND fault_status = 'CONFIRMED_DS' AND scb_id = ANY(:active_scbs)"
+        es_params["active_scbs"] = active_scbs
         energy_sql = text(f"""
             SELECT SUBSTR(timestamp, 1, 10) AS date, SUM(energy_loss_kwh) AS loss
             FROM fault_diagnostics
@@ -993,7 +1013,12 @@ def build_ds_scb_status_payload(
         data.append(row_dict)
 
     energy_available, energy_note = _voltage_meta(db, plant_id, date_from, date_to)
-    return {"data": data, "energy_available": energy_available, "energy_note": energy_note}
+    return {
+        "data": data,
+        "energy_available": energy_available,
+        "energy_note": energy_note,
+        "payload_version": DS_SUMMARY_PAYLOAD_VERSION,
+    }
 
 
 @router.get("/ds-scb-status")
@@ -1015,6 +1040,14 @@ def get_ds_scb_status(
         if got is None:
             raise HTTPException(503, detail=SNAPSHOT_READ_ONLY_HTTP_DETAIL)
         payload, fresh = got
+        ver_ok = int(payload.get("payload_version") or 0) >= DS_SUMMARY_PAYLOAD_VERSION
+        if not ver_ok:
+            if snapshot_allow_stale():
+                return attach_snapshot_stale_meta(payload)
+            raise HTTPException(
+                503,
+                detail="Stored DS status predates current DS persistence rules. Refresh snapshots or disable read-only mode.",
+            )
         if fresh:
             record_snapshot("ds_status", True)
             record_compute_ms("ds_status_http", (time.perf_counter() - t0) * 1000.0, f"hit ro plant={plant_id}")
@@ -1026,7 +1059,7 @@ def get_ds_scb_status(
         raise HTTPException(503, detail=SNAPSHOT_STALE_HTTP_DETAIL)
 
     hit = get_ds_status_snapshot(db, plant_id, key_from, key_to)
-    if hit is not None:
+    if hit is not None and int(hit.get("payload_version") or 0) >= DS_SUMMARY_PAYLOAD_VERSION:
         record_snapshot("ds_status", True)
         record_compute_ms("ds_status_http", (time.perf_counter() - t0) * 1000.0, f"hit plant={plant_id}")
         return hit
@@ -1371,23 +1404,31 @@ def get_runtime_tabs_bundle(
 
 
 def _fault_inverter_dc_energy_kwh_map(db: Session, plant_id: str, _from: str, _to: str) -> dict:
-    """Integrated dc_power → kWh per inverter. Tries `choose_data_table` then raw_data_generic."""
+    """Integrated inverter energy for DC-impact denominator.
+
+    Prefer dc_power. If a plant/range has no dc_power, fall back to ac_power so
+    the DC impact card can still show a conservative DC-equivalent instead of a dash.
+    """
     f_ts = f"{_from[:10]} 00:00:00"
     t_ts = f"{_to[:10]} 23:59:59"
     primary = choose_data_table(db, plant_id, _from[:10], _to[:10])
     tables = [primary] + (["raw_data_generic"] if primary != "raw_data_generic" else [])
-    for table in tables:
-        try:
-            rows = db.execute(
-                text(sql_inverter_dc_energy_kwh(table)),
-                {"plant_id": plant_id, "f": f_ts, "t": t_ts},
-            ).fetchall()
-        except Exception:
-            _log.warning("dc_power energy map failed plant=%s table=%s", plant_id, table)
-            continue
-        out = {str(r[0]): float(r[1] or 0) for r in rows if r[0] is not None}
-        if out and sum(out.values()) > 1e-6:
-            return out
+    for signal in ("dc_power", "ac_power"):
+        for table in tables:
+            try:
+                sql = sql_inverter_dc_energy_kwh(table)
+                if signal != "dc_power":
+                    sql = sql.replace("'dc_power'", f"'{signal}'")
+                rows = db.execute(
+                    text(sql),
+                    {"plant_id": plant_id, "f": f_ts, "t": t_ts},
+                ).fetchall()
+            except Exception:
+                _log.warning("%s energy map failed plant=%s table=%s", signal, plant_id, table)
+                continue
+            out = {str(r[0]): float(r[1] or 0) for r in rows if r[0] is not None}
+            if out and sum(out.values()) > 1e-6:
+                return out
     return {}
 
 
@@ -1656,6 +1697,7 @@ def _unified_fault_categories_core(
     gb_sum = gb_tab.get("summary") or {}
     gb_count = int(gb_sum.get("active_grid_events") or 0)
     gb_hours = float(gb_sum.get("total_grid_breakdown_hours") or 0)
+    gb_loss_mwh = round(float(gb_sum.get("total_grid_breakdown_energy_loss_kwh") or 0) / 1000.0, 4)
 
     comm_sum = comm_tab.get("summary") or {}
     comm_count = int(comm_sum.get("total_communication_issues") or 0)
@@ -1703,9 +1745,9 @@ def _unified_fault_categories_core(
         {
             "id": "gb",
             "label": "Grid Breakdown",
-            "loss_mwh": 0.0,
+            "loss_mwh": gb_loss_mwh,
             "fault_count": gb_count,
-            "metric_note": f"Breakdown hours (plant total): {gb_hours:.2f} h; MWh not modeled in feed",
+            "metric_note": f"Breakdown hours (plant total): {gb_hours:.2f} h; expected plant AC loss: {gb_loss_mwh:.4f} MWh",
         },
         {
             "id": "comm",
@@ -1809,6 +1851,7 @@ def _unified_feed_categories_only(
         "date_from": _from,
         "date_to": _to,
         "plant_id": plant_id,
+        "payload_version": UNIFIED_FAULT_PAYLOAD_VERSION,
         "categories": core["categories"],
         "totals": core["totals"],
         "ds_energy_note": ds_summary.get("energy_note"),
@@ -1947,7 +1990,8 @@ def _unified_feed_rows_and_categories(
             continue
         hrs = float(erow.get("breakdown_hours") or 0)
         pts = int(erow.get("breakdown_points") or 0)
-        if pts <= 0 and hrs <= 0:
+        ekwh_gb = float(erow.get("total_grid_breakdown_energy_loss_kwh") or 0)
+        if pts <= 0 and hrs <= 0 and ekwh_gb <= 0:
             continue
         ls_raw_gb = erow.get("last_seen_breakdown") or erow.get("investigation_window_end")
         as_raw_gb = erow.get("investigation_window_start")
@@ -1961,7 +2005,7 @@ def _unified_feed_rows_and_categories(
                 "occurred_at": str(ls_raw_gb or f"{str(_to)[:10]} 23:59:59"),
                 "equipment_id": str(eid),
                 "equipment_level": "plant_event",
-                "severity_energy_kwh": 0.0,
+                "severity_energy_kwh": round(ekwh_gb, 4),
                 "severity_hours": round(hrs, 4),
                 "duration_note": f"{pts} points",
                 "status": "Grid breakdown",
@@ -1969,7 +2013,7 @@ def _unified_feed_rows_and_categories(
                 "last_seen": ls_gb,
                 "is_fault_active": _fault_is_active(ls_gb, _to),
                 "investigate": {"kind": "gb", "event_id": str(eid)},
-                "_sort_loss_kwh": hrs * 100.0,
+                "_sort_loss_kwh": ekwh_gb if ekwh_gb > 0 else hrs * 100.0,
             }
         )
 
@@ -2129,6 +2173,7 @@ def _unified_feed_rows_and_categories(
         "date_from": _from,
         "date_to": _to,
         "plant_id": plant_id,
+        "payload_version": UNIFIED_FAULT_PAYLOAD_VERSION,
         "categories": categories,
         "totals": core["totals"],
         "rows": rows,
@@ -2154,6 +2199,14 @@ def get_unified_fault_feed(
         if got is None:
             raise HTTPException(503, detail=SNAPSHOT_READ_ONLY_HTTP_DETAIL)
         payload, fresh = got
+        ver_ok = int(payload.get("payload_version") or 0) >= UNIFIED_FAULT_PAYLOAD_VERSION
+        if not ver_ok:
+            if snapshot_allow_stale():
+                return attach_snapshot_stale_meta(payload)
+            raise HTTPException(
+                503,
+                detail="Stored unified fault snapshot predates current DC impact / grid-loss metrics. Refresh snapshots or disable read-only mode.",
+            )
         if fresh:
             record_snapshot("unified_feed", True)
             record_compute_ms("unified_feed_http", (time.perf_counter() - t0) * 1000.0, f"hit ro plant={plant_id}")
@@ -2164,7 +2217,7 @@ def get_unified_fault_feed(
             return attach_snapshot_stale_meta(payload)
         raise HTTPException(503, detail=SNAPSHOT_STALE_HTTP_DETAIL)
     cached = get_unified_fault_snapshot(db, plant_id, _from, _to)
-    if cached is not None:
+    if cached is not None and int(cached.get("payload_version") or 0) >= UNIFIED_FAULT_PAYLOAD_VERSION:
         record_snapshot("unified_feed", True)
         record_compute_ms("unified_feed_http", (time.perf_counter() - t0) * 1000.0, f"hit plant={plant_id}")
         return cached

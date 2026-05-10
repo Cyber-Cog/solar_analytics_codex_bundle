@@ -356,6 +356,7 @@ async function buildUnifiedFeedClientSide(plantId, from, to) {
 
   const gbCount = Number((gbSummary && gbSummary.active_grid_events) || 0);
   const gbHours = Number((gbSummary && gbSummary.total_grid_breakdown_hours) || 0);
+  const gbLossMwh = Math.round(Number((gbSummary && gbSummary.total_grid_breakdown_energy_loss_kwh) || 0) / 1000 * 10000) / 10000;
 
   const commCount = Number((commSummary && commSummary.total_communication_issues) || 0);
   const commLossMwh = Math.round(Number((commSummary && commSummary.total_loss_kwh) || 0) / 1000 * 10000) / 10000;
@@ -374,7 +375,7 @@ async function buildUnifiedFeedClientSide(plantId, from, to) {
     { id: 'ds', label: 'Disconnected Strings', loss_mwh: dsLossMwh, fault_count: dsCount, metric_note: dsEnergyOk ? 'Energy loss summed over range' : (dsSummary.energy_note || 'Energy N/A') },
     { id: 'pl', label: 'Power Limitation', loss_mwh: plLossMwh, fault_count: plCount, metric_note: '10:00–15:00 window; energy loss (kWh) / 1000' },
     { id: 'is', label: 'Inverter Shutdown', loss_mwh: isLossMwh, fault_count: isCount, metric_note: `Shutdown hours: ${isHours.toFixed(2)} h; peer-expected loss (MWh): ${isLossMwh.toFixed(4)}` },
-    { id: 'gb', label: 'Grid Breakdown', loss_mwh: 0, fault_count: gbCount, metric_note: `Breakdown hours (plant total): ${gbHours.toFixed(2)} h; MWh not modeled in feed` },
+    { id: 'gb', label: 'Grid Breakdown', loss_mwh: gbLossMwh, fault_count: gbCount, metric_note: `Breakdown hours (plant total): ${gbHours.toFixed(2)} h; expected plant AC loss: ${gbLossMwh.toFixed(4)} MWh` },
     { id: 'comm', label: 'Communication Issue', loss_mwh: commLossMwh, fault_count: commCount, metric_note: 'Hierarchical communication ownership with expected-power loss and no SCB duplicate loss' },
     { id: 'scb_perf', label: 'Soiling', loss_mwh: solLossMwh, fault_count: solCount, metric_note: 'Plant PR-regression loss + top SCB peer losses (estimated)' },
     { id: 'inv_eff', label: 'Inverter Efficiency', loss_mwh: invEffLossMwh, fault_count: invEffCount, metric_note: 'DC→AC conversion loss Σ (Pdc−Pac)·dt across inverters (same basis as the Inverter Efficiency tab)' },
@@ -475,7 +476,8 @@ async function buildUnifiedFeedClientSide(plantId, from, to) {
     if (!eid) return;
     const hrs = Number(erow.breakdown_hours || 0);
     const pts = Number(erow.breakdown_points || 0);
-    if (pts <= 0 && hrs <= 0) return;
+    const ekwhGb = Number(erow.total_grid_breakdown_energy_loss_kwh || 0);
+    if (pts <= 0 && hrs <= 0 && ekwhGb <= 0) return;
     const lsGb = erow.last_seen_breakdown || erow.investigation_window_end;
     const asGb = erow.investigation_window_start;
     const endD = (to && String(to).slice(0, 10)) || '';
@@ -487,7 +489,7 @@ async function buildUnifiedFeedClientSide(plantId, from, to) {
       occurred_at: String(lsGb || `${toDay} 23:59:59`),
       equipment_id: String(eid),
       equipment_level: 'plant_event',
-      severity_energy_kwh: 0,
+      severity_energy_kwh: Math.round(ekwhGb * 10000) / 10000,
       severity_hours: Math.round(hrs * 10000) / 10000,
       duration_note: `${pts} points`,
       status: 'Grid breakdown',
@@ -495,7 +497,7 @@ async function buildUnifiedFeedClientSide(plantId, from, to) {
       last_seen: lsGb || null,
       is_fault_active: activeGb,
       investigate: { kind: 'gb', event_id: String(eid) },
-      _sort_loss_kwh: hrs * 100,
+      _sort_loss_kwh: ekwhGb > 0 ? ekwhGb : hrs * 100,
     });
   });
 

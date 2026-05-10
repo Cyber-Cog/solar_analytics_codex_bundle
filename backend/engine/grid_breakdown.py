@@ -14,6 +14,7 @@ import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from engine.communication_issue import _build_expected_power_maps, _load_architecture_meta
 from engine.inverter_shutdown import IS_AC_ZERO_TOL, IS_IRRADIANCE_MIN, _normalize_date_str, _pick_irradiance
 
 
@@ -107,6 +108,17 @@ def run_grid_breakdown(
     if not np.isfinite(dt_h) or dt_h <= 0:
         dt_h = 1.0 / 60.0
 
+    # Loss for grid breakdown has no live peer inverter to compare against. Use
+    # the same irradiance/DC-capacity expected-power model as communication loss,
+    # calibrated from non-breakdown production samples in the selected range.
+    inv_caps, _, _ = _load_architecture_meta(db, plant_id)
+    gb_ts = set(ts.loc[ts["grid_breakdown"], "timestamp"].tolist())
+    ac_for_perf = df[~df["timestamp"].isin(gb_ts)].copy()
+    daylight = ts[["timestamp", "mean_irradiance"]].rename(columns={"mean_irradiance": "irradiance"})
+    expected_plant_kw_by_ts, _, _ = _build_expected_power_maps(daylight, ac_for_perf, inv_caps)
+    ts["expected_plant_ac_kw"] = ts["timestamp"].map(lambda x: float(expected_plant_kw_by_ts.get(x) or 0.0))
+    ts["loss_kwh_step"] = np.where(ts["grid_breakdown"], ts["expected_plant_ac_kw"] * dt_h, 0.0)
+
     gb = ts[ts["grid_breakdown"]].copy()
     events: List[dict] = []
     if not gb.empty:
@@ -114,6 +126,7 @@ def run_grid_breakdown(
         for _, g in gb.groupby("run"):
             points = int(len(g))
             hours = round(points * dt_h, 3)
+            total_loss = float(g["loss_kwh_step"].sum())
             start = g["timestamp"].min()
             end = g["timestamp"].max()
             events.append(
@@ -121,6 +134,7 @@ def run_grid_breakdown(
                     "event_id": f"GB-{start.strftime('%Y%m%d-%H%M%S')}",
                     "breakdown_points": points,
                     "breakdown_hours": hours,
+                    "total_grid_breakdown_energy_loss_kwh": round(total_loss, 2),
                     "last_seen_breakdown": str(end),
                     "investigation_window_start": str(start),
                     "investigation_window_end": str(end),
@@ -135,6 +149,8 @@ def run_grid_breakdown(
                 "inverter_count": int(r["inverter_count"]),
                 "zero_power_inverter_count": int(r["zero_count"]),
                 "irradiance": round(float(r["mean_irradiance"]), 3),
+                "expected_plant_ac_kw": round(float(r.get("expected_plant_ac_kw") or 0), 3),
+                "energy_loss_kwh_step": round(float(r.get("loss_kwh_step") or 0), 6),
                 "grid_breakdown": bool(r["grid_breakdown"]),
             }
         )

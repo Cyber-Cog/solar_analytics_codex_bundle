@@ -16,7 +16,7 @@
 (function () {
   'use strict';
 
-  var ASSET_BUILD_ID = '2026-05-10-is-energy-loss-ui';
+  var ASSET_BUILD_ID = '2026-05-10-fault-diagnostics-corrections';
 
   function perfLog(label, t0) {
     try {

@@ -341,8 +341,12 @@ async function buildUnifiedFeedClientSide(plantId, from, to) {
 
   const series = dsSummary.daily_energy_series || [];
   const dsEnergyOk = !!dsSummary.energy_available;
+  const seriesSumKwh = series.reduce((s, d) => s + (Number(d.energy_loss_kwh) || 0), 0);
+  const totalDsKwh = dsSummary.total_ds_energy_loss_kwh != null && dsSummary.total_ds_energy_loss_kwh !== ''
+    ? Number(dsSummary.total_ds_energy_loss_kwh)
+    : seriesSumKwh;
   const dsLossMwh = dsEnergyOk
-    ? Math.round(series.reduce((s, d) => s + (Number(d.energy_loss_kwh) || 0), 0) / 1000 * 10000) / 10000
+    ? Math.round((Number.isFinite(totalDsKwh) ? totalDsKwh : seriesSumKwh) / 1000 * 10000) / 10000
     : 0;
   const dsCount = Number(dsSummary.active_ds_faults || 0);
 

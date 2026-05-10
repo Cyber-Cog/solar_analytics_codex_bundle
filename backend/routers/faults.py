@@ -58,18 +58,18 @@ from snap_perf import record_compute_ms, record_snapshot
 router = APIRouter(prefix="/api/faults", tags=["Faults"])
 
 # Bump when DS summary JSON semantics change so DB snapshots are recomputed even if still "fresh" vs raw_data_stats.
-DS_SUMMARY_PAYLOAD_VERSION = 5
-UNIFIED_FAULT_PAYLOAD_VERSION = 4
+DS_SUMMARY_PAYLOAD_VERSION = 9
+UNIFIED_FAULT_PAYLOAD_VERSION = 9
 GB_TAB_PAYLOAD_VERSION = 2
 DS_MIN_CONFIRMED_POINTS = int(os.getenv("DS_MIN_CONFIRMED_POINTS", "3"))
 
 _MEM_PL_PAGE = "faults_pl_page_v2"
-_MEM_IS_TAB = "faults_is_tab_v4"
+_MEM_IS_TAB = "faults_is_tab_v5_peer_expected"
 _MEM_GB_TAB = "faults_gb_tab_v4_pr_loss"
 _MEM_COMM_TAB = "faults_comm_tab_v2"
 _MEM_INV_EFF_AGG = "faults_inv_eff_agg_v3"
 _MEM_CD_TAB = "faults_cd_tab_v3_fast"
-_MEM_RUNTIME_TABS_BUNDLE = "faults_runtime_tabs_bundle_v10_gb_pr_loss"
+_MEM_RUNTIME_TABS_BUNDLE = "faults_runtime_tabs_bundle_v11_ds_energy_is_peer"
 
 def _compute_inv_eff_aggregate(
     db: Session, plant_id: str, _from: str, _to: str
@@ -726,6 +726,7 @@ def build_ds_summary_dict(
             "active_ds_faults": 0,
             "total_disconnected_strings": 0,
             "daily_energy_loss_kwh": 0,
+            "total_ds_energy_loss_kwh": 0,
             "top_affected_scbs": [],
             "latest_date": date_to or "No Data",
             "total_scbs": total_scbs,
@@ -789,34 +790,45 @@ def build_ds_summary_dict(
     daily_loss_mwh = None
     if energy_available:
         if active_scbs:
-            latest_day_start = f"{latest_date} 00:00:00"
-            latest_day_end = f"{latest_date} 23:59:59"
-            daily_loss = db.query(func.sum(FaultDiagnostics.energy_loss_kwh)).filter(
+            rng_start = f"{str(date_from)[:10]} 00:00:00" if date_from else None
+            rng_end = f"{str(date_to)[:10]} 23:59:59" if date_to else None
+            q_sum = db.query(func.sum(FaultDiagnostics.energy_loss_kwh)).filter(
                 FaultDiagnostics.plant_id == plant_id,
                 FaultDiagnostics.scb_id.in_(active_scbs),
                 FaultDiagnostics.fault_status == "CONFIRMED_DS",
-                FaultDiagnostics.timestamp >= latest_day_start,
-                FaultDiagnostics.timestamp <= latest_day_end,
-            ).scalar() or 0.0
-            top_scbs_query = db.query(
+            )
+            if rng_start:
+                q_sum = q_sum.filter(FaultDiagnostics.timestamp >= rng_start)
+            if rng_end:
+                q_sum = q_sum.filter(FaultDiagnostics.timestamp <= rng_end)
+            daily_loss = float(q_sum.scalar() or 0.0)
+            top_q = db.query(
                 FaultDiagnostics.scb_id,
-                func.sum(FaultDiagnostics.energy_loss_kwh).label("total_loss")
+                func.sum(FaultDiagnostics.energy_loss_kwh).label("total_loss"),
             ).filter(
                 FaultDiagnostics.plant_id == plant_id,
                 FaultDiagnostics.scb_id.in_(active_scbs),
                 FaultDiagnostics.fault_status == "CONFIRMED_DS",
-                FaultDiagnostics.timestamp >= latest_day_start,
-                FaultDiagnostics.timestamp <= latest_day_end,
-            ).group_by(FaultDiagnostics.scb_id).order_by(func.sum(FaultDiagnostics.energy_loss_kwh).desc()).limit(5).all()
+            )
+            if rng_start:
+                top_q = top_q.filter(FaultDiagnostics.timestamp >= rng_start)
+            if rng_end:
+                top_q = top_q.filter(FaultDiagnostics.timestamp <= rng_end)
+            top_scbs_query = (
+                top_q.group_by(FaultDiagnostics.scb_id)
+                .order_by(func.sum(FaultDiagnostics.energy_loss_kwh).desc())
+                .limit(5)
+                .all()
+            )
             top_scbs = [
                 {"scb_id": r[0], "loss_kwh": round(r[1], 2), "loss_mwh": round((r[1] or 0) / 1000, 3)}
                 for r in top_scbs_query
-                if r[1] > 0
+                if r[1] and r[1] > 0
             ]
         else:
             daily_loss = 0.0
             top_scbs = []
-        daily_loss_mwh = round(daily_loss / 1000, 3) if daily_loss else 0
+        daily_loss_mwh = round(daily_loss / 1000, 4) if daily_loss else 0
 
     f_ts = f"{date_from} 00:00:00" if date_from else None
     t_ts = f"{date_to} 23:59:59" if date_to else None
@@ -849,6 +861,7 @@ def build_ds_summary_dict(
         "active_ds_faults": active_count,
         "total_disconnected_strings": total_strings,
         "daily_energy_loss_kwh": round(daily_loss, 2) if daily_loss is not None else None,
+        "total_ds_energy_loss_kwh": round(daily_loss, 2) if daily_loss is not None else None,
         "daily_energy_loss_mwh": daily_loss_mwh,
         "top_affected_scbs": top_scbs,
         "latest_date": latest_date,
@@ -1028,6 +1041,13 @@ def build_ds_scb_status_payload(
             elif scb in fallback_map:
                 row_dict["recurring_days"] = max(1, int(fallback_map[scb]["recurring_days"]))
         data.append(row_dict)
+
+    if date_from and date_to:
+        ekwh_map = _ds_scb_confirmed_energy_sum_kwh(db, plant_id, date_from, date_to)
+        for row_dict in data:
+            sid = row_dict.get("scb_id")
+            if sid and sid in ekwh_map:
+                row_dict["energy_loss_kwh"] = round(float(ekwh_map[sid]), 2)
 
     energy_available, energy_note = _voltage_meta(db, plant_id, date_from, date_to)
     return {
@@ -1697,9 +1717,13 @@ def _unified_fault_categories_core(
 
     series = ds_summary.get("daily_energy_series") or []
     ds_energy_ok = bool(ds_summary.get("energy_available"))
-    ds_loss_mwh = (
-        round(sum(float(d.get("energy_loss_kwh") or 0) for d in series) / 1000.0, 4) if ds_energy_ok else 0.0
-    )
+    total_ds_kwh = ds_summary.get("total_ds_energy_loss_kwh")
+    if ds_energy_ok and total_ds_kwh is not None:
+        ds_loss_mwh = round(float(total_ds_kwh) / 1000.0, 4)
+    elif ds_energy_ok:
+        ds_loss_mwh = round(sum(float(d.get("energy_loss_kwh") or 0) for d in series) / 1000.0, 4)
+    else:
+        ds_loss_mwh = 0.0
     ds_count = int(ds_summary.get("active_ds_faults") or 0)
 
     pl_sum = pl_page.get("summary") or {}

@@ -311,17 +311,21 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
   }, [subView, plantId, dateFrom, dateTo]);
 
   useEffect(() => {
-    if (subView !== 'is' || !plantId) return;
+    if (!plantId || !dateFrom || !dateTo) return;
     setIsLoading(true);
     Promise.all([
       window.SolarAPI.Faults.isSummary(plantId, dateFrom, dateTo),
-      window.SolarAPI.Faults.isInverterStatus(plantId, dateFrom, dateTo)
+      window.SolarAPI.Faults.isInverterStatus(plantId, dateFrom, dateTo),
     ]).then(([summary, status]) => {
       setIsSummary(summary || null);
       setIsStatus((status && status.data) || []);
       setIsLoading(false);
-    }).catch(() => { setIsSummary(null); setIsStatus([]); setIsLoading(false); });
-  }, [subView, plantId, dateFrom, dateTo]);
+    }).catch(() => {
+      setIsSummary(null);
+      setIsStatus([]);
+      setIsLoading(false);
+    });
+  }, [plantId, dateFrom, dateTo]);
 
   useEffect(() => {
     if (subView !== 'gb' || !plantId) return;
@@ -1916,7 +1920,7 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
             h(KpiCard, { label: 'Active DS Faults', value: dsSummary.active_ds_faults, unit: 'SCBs', color: 'var(--solar-orange)' }),
             h(KpiCard, { label: 'Total Disconnected Strings', value: dsSummary.total_disconnected_strings, unit: 'strings', color: '#EF4444' }),
             h(KpiCard, {
-              label: 'Daily Energy Loss',
+              label: 'Total energy loss (range)',
               value: dsSummary.energy_available
                 ? (dsSummary.daily_energy_loss_mwh != null ? dsSummary.daily_energy_loss_mwh
                    : dsSummary.daily_energy_loss_kwh != null ? (dsSummary.daily_energy_loss_kwh / 1000).toFixed(2)

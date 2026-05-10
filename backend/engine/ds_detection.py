@@ -5,7 +5,7 @@ Disconnected String (DS) Detection Engine.
 
 Pipeline order:
   Step 0  — Load architecture (strings_per_scb, spare_flag, inverter mapping).
-  Step 1  — Auto-detect data resolution → PERSISTENCE_POINTS = 30 min / resolution.
+  Step 1  — Auto-detect data resolution → PERSISTENCE_POINTS = wall-clock persistence / resolution.
   Step 2  — Fetch irradiance for full date range (used in Steps 3 & 5).
   Step 3  — Leakage current detection on UNFILTERED data (must come before irradiance
              band filter, because leakage is defined at LOW irradiance < 200 W/m²
@@ -21,9 +21,9 @@ Pipeline order:
   Step 7  — Normalise: per_string_current = scb_current / N_strings
   Step 8  — Virtual reference string (per inverter + timestamp):
                top TOP_PERCENTILE SCBs → median(per_string_current) = ref_current
-  Step 9  — DS candidate: missing_current = max(0, ref×N − actual), candidate if persistent loss is near one string
+  Step 9  — DS candidate from current only (relative drop vs ref); DC voltage is not a detection gate
   Step 10 — Persistence window (≥ PERSISTENCE_POINTS consecutive): CONFIRMED_DS
-  Step 11 — Window-min rule for missing_strings; resolution-aware energy loss.
+  Step 11 — Window-min rule for missing_strings; energy = ∫ (V_eff × I_missing) dt with forward Δt per sample.
   Step 12 — Bulk insert to fault_diagnostics.
 """
 
@@ -57,8 +57,8 @@ CONST_CONSECUTIVE_THRESHOLD = int(os.getenv("DS_CONSTANT_CONSECUTIVE_THRESHOLD",
 CONST_FLAT_RATIO_MIN = float(os.getenv("DS_CONSTANT_FLAT_RATIO_MIN", "0.995"))
 CONST_UNIQUE_MAX = int(os.getenv("DS_CONSTANT_UNIQUE_MAX", "3"))
 
-# Persistence: fault must last 30 MINUTES continuously (auto-converted to timestamps)
-PERSISTENCE_MINUTES = int(os.getenv("DS_PERSISTENCE_MINUTES", "30"))
+# Persistence: fault must last this many minutes wall-clock continuously (default 6 h; override DS_PERSISTENCE_MINUTES)
+PERSISTENCE_MINUTES = int(os.getenv("DS_PERSISTENCE_MINUTES", "360"))
 RECOVERY_MINUTES = int(os.getenv("DS_RECOVERY_MINUTES", "15"))
 DATA_GAP_MULTIPLIER = float(os.getenv("DS_EVENT_GAP_MULTIPLIER", "3.0"))
 
@@ -66,7 +66,6 @@ DATA_GAP_MULTIPLIER = float(os.getenv("DS_EVENT_GAP_MULTIPLIER", "3.0"))
 # false positives are more damaging than missed single-sample anomalies.
 DS_CURRENT_DROP_PCT = float(os.getenv("DS_CURRENT_DROP_PCT", "0.30"))
 DS_COMPARE_RATIO = max(0.0, min(1.0, 1.0 - DS_CURRENT_DROP_PCT))
-DS_VOLTAGE_TOL_PCT = float(os.getenv("DS_VOLTAGE_TOL_PCT", "10"))
 DS_ROLLING_MEDIAN_WINDOW = int(os.getenv("DS_ROLLING_MEDIAN_WINDOW", "5"))
 DS_ZERO_EXPORT_KW_MIN = float(os.getenv("DS_ZERO_EXPORT_KW_MIN", "0.5"))
 DS_ZERO_EXPORT_MEDIAN_RATIO = float(os.getenv("DS_ZERO_EXPORT_MEDIAN_RATIO", "0.02"))
@@ -74,9 +73,19 @@ DS_MISSING_STRING_TOLERANCE = float(os.getenv("DS_MISSING_STRING_TOLERANCE", "0.
 # MPPT-only: lift reference toward max peer per-string current so one disconnected MPPT
 # (no clipping) is not masked when siblings clip (ref from p75 alone can sit too low).
 DS_MPPT_REF_FROM_MAX_PEER_FRAC = float(os.getenv("DS_MPPT_REF_FROM_MAX_PEER_FRAC", "0.98"))
+# DC energy integration (kWh): P = V × I_missing; V uses local SCB voltage when sane vs peers, else peer median.
+DS_ENERGY_V_MIN = float(os.getenv("DS_ENERGY_V_MIN", "50.0"))
+DS_ENERGY_PEER_REL_BAND = float(os.getenv("DS_ENERGY_PEER_REL_BAND", "0.45"))
+DS_MIN_ENERGY_DT_SEC = int(os.getenv("DS_MIN_ENERGY_DT_SEC", "30"))
+DS_MAX_ENERGY_DT_SEC = int(os.getenv("DS_MAX_ENERGY_DT_SEC", "900"))
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _peer_median_voltage_ge_min(series: pd.Series) -> float:
+    x = pd.to_numeric(series, errors="coerce").to_numpy(dtype=float)
+    x = x[np.isfinite(x) & (x >= DS_ENERGY_V_MIN)]
+    return float(np.median(x)) if x.size > 0 else float("nan")
 
 def _detect_resolution_minutes(df: pd.DataFrame) -> float:
     """
@@ -354,22 +363,6 @@ def _smooth_measurements(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _voltage_ok_series(df: pd.DataFrame, group_cols: list[str]) -> pd.Series:
-    volts = pd.to_numeric(df["dc_voltage"], errors="coerce")
-    group_median = volts.groupby([df[c] for c in group_cols]).transform("median")
-    group_count = volts.groupby([df[c] for c in group_cols]).transform(lambda s: int(np.isfinite(s).sum()))
-    pct = (volts - group_median).abs() / group_median.replace(0, np.nan) * 100.0
-    # When fewer than 2 voltage peers exist, we cannot compute a meaningful spread.
-    # Defaulting to True avoids vetoing real DS faults just because one inverter has
-    # a single SCB with voltage data — the current-drop evidence is still valid.
-    within_tol = np.isfinite(pct) & (pct <= DS_VOLTAGE_TOL_PCT)
-    return pd.Series(
-        np.where(group_count >= 2, within_tol, True),
-        index=df.index,
-        dtype=bool,
-    )
-
-
 def _rebuild_fault_events_from_diagnostics(
     db: Session,
     plant_id: str,
@@ -468,7 +461,7 @@ def _rebuild_fault_events_from_diagnostics(
                 "equipment_id": equipment_id,
                 "fault_type": "DS",
                 "start_time": ts_py,
-                "start_reason": "persistent_relative_current_drop_voltage_consistent",
+                "start_reason": "persistent_relative_current_drop",
             }
             max_ms = max(0, missing)
         else:
@@ -772,8 +765,7 @@ def run_ds_detection(plant_id: str, df: pd.DataFrame, db: Session):
     # ── Step 8 — Reference current inside each inverter ───────────────────────
     # MPPT: compare normalized MPPT currents by median, not raw power, so unequal
     # string counts do not become false DS.
-    # SCB: use the existing top-percentile virtual reference for central inverter
-    # SCB groups, but add voltage consistency in Step 9.
+    # SCB: use the existing top-percentile virtual reference for central inverter SCB groups.
     if plant_type == "MPPT":
         # Use 75th-percentile rather than median so that co-faulty MPPTs (which
         # pull the median down) do not suppress detection of the faulty channel.
@@ -801,21 +793,13 @@ def run_ds_detection(plant_id: str, df: pd.DataFrame, db: Session):
         df["missing_current"] / df["ref_current"],
         0.0,
     )
-    df["voltage_ok"]           = _voltage_ok_series(df, ["timestamp", "inverter_id"])
     if plant_type == "MPPT":
-        # Same-inverter MPPT comparison after string-count normalization.
-        df["candidate"] = (
-            df["voltage_ok"]
-            & (df["per_string_current"] < (df["ref_current"] * DS_COMPARE_RATIO))
-        )
+        # Same-inverter MPPT comparison after string-count normalization (current only).
+        df["candidate"] = df["per_string_current"] < (df["ref_current"] * DS_COMPARE_RATIO)
     else:
-        # SCB central inverter logic: persistent near-one-string current loss
-        # plus similar voltage to peers. The 0.85 default tolerance catches
-        # cases like 12 A vs 6.4 A on a two-string SCB without changing the
-        # persistence gate below.
+        # SCB central inverter: near-one-string current loss vs virtual reference (current only).
         df["candidate"] = (
-            df["voltage_ok"]
-            & (df["missing_string_ratio"] >= DS_MISSING_STRING_TOLERANCE)
+            (df["missing_string_ratio"] >= DS_MISSING_STRING_TOLERANCE)
             & (df["scb_current"] < df["expected_scb_current"])
         )
     df["ds_count"]             = 0
@@ -846,14 +830,24 @@ def run_ds_detection(plant_id: str, df: pd.DataFrame, db: Session):
     energy_loss = np.zeros(n, dtype=np.float64)
     ms_out      = np.zeros(n, dtype=np.int32)
 
+    # Voltage for kWh = ∫ P dt: prefer local SCB V when consistent with inverter peers; else peer median (bad local sensors).
+    peer_v = df.groupby(["timestamp", "inverter_id"], sort=False)["dc_voltage"].transform(_peer_median_voltage_ge_min)
+    lv = pd.to_numeric(df["dc_voltage"], errors="coerce").to_numpy(dtype=float)
+    pv = pd.to_numeric(peer_v, errors="coerce").to_numpy(dtype=float)
+    local_sane = (
+        np.isfinite(lv)
+        & np.isfinite(pv)
+        & (pv >= DS_ENERGY_V_MIN)
+        & (np.abs(lv - pv) / np.maximum(pv, 1.0) <= DS_ENERGY_PEER_REL_BAND)
+    )
+    v_energy = np.where(local_sane, lv, np.where(np.isfinite(pv) & (pv >= DS_ENERGY_V_MIN), pv, np.nan))
+
     # SCB segment boundaries (data is sorted by scb_id, timestamp)
     scb_change = np.concatenate([[True], scb_arr[1:] != scb_arr[:-1]])
     starts = np.where(scb_change)[0]
     ends   = np.concatenate([starts[1:], [n]])
 
-    # Energy divisor: kWh per timestamp = kW × (resolution_minutes / 60)
-    # SUGGESTION B: resolution-aware energy loss (was hardcoded to /60 → only valid for 1-min data)
-    energy_interval_h = resolution_minutes / 60.0
+    res_sec_default = max(30, int(round(resolution_minutes * 60)))
 
     for si, ei in zip(starts, ends):
         i = si
@@ -885,13 +879,21 @@ def run_ds_detection(plant_id: str, df: pd.DataFrame, db: Session):
                 for j in range(run_start, run_end):
                     fault_flag[j] = 1
                     ms_out[j]     = win_min
-                    if (
-                        np.isfinite(dv_arr[j]) and dv_arr[j] > 0
-                        and np.isfinite(mc_arr[j]) and mc_arr[j] > 0
-                    ):
-                        pl = dv_arr[j] * mc_arr[j] / 1000.0
-                        power_loss[j]  = pl
-                        energy_loss[j] = pl * energy_interval_h
+                    v_j = float(v_energy[j]) if j < len(v_energy) else float("nan")
+                    if not (np.isfinite(v_j) and v_j > 0 and np.isfinite(mc_arr[j]) and mc_arr[j] > 0):
+                        continue
+                    pl = v_j * mc_arr[j] / 1000.0
+                    power_loss[j] = pl
+                    if j + 1 < ei and scb_arr[j + 1] == scb_arr[j]:
+                        dt_sec = int(ts_epoch[j + 1]) - int(ts_epoch[j])
+                    elif j > run_start:
+                        dt_sec = int(ts_epoch[j]) - int(ts_epoch[j - 1])
+                    else:
+                        dt_sec = res_sec_default
+                    if dt_sec <= 0:
+                        dt_sec = res_sec_default
+                    dt_sec = max(DS_MIN_ENERGY_DT_SEC, min(dt_sec, DS_MAX_ENERGY_DT_SEC))
+                    energy_loss[j] = pl * (dt_sec / 3600.0)
 
             i = run_end
 

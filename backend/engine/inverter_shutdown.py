@@ -166,6 +166,20 @@ def run_inverter_shutdown(
     df = df.merge(ts_expected.reset_index(), on="timestamp", how="left")
     df["expected_ac_kw"] = pd.to_numeric(df["expected_ac_kw"], errors="coerce").fillna(0.0)
 
+    # If the timestamp-wide top-quartile median is ~0 but some inverters are still exporting,
+    # use the 75th percentile of strictly positive AC at that timestamp so shutdown loss is not forced to 0.
+    def _plant_pos_p75(s: pd.Series) -> float:
+        x = pd.to_numeric(s, errors="coerce").to_numpy(dtype=float)
+        x = x[np.isfinite(x) & (x > IS_AC_ZERO_TOL)]
+        return float(np.percentile(x, 75)) if x.size else 0.0
+
+    plant_pos_p75 = df.groupby("timestamp", sort=False)["ac_kw"].transform(_plant_pos_p75)
+    df["expected_ac_kw"] = np.where(
+        (df["expected_ac_kw"] <= IS_AC_ZERO_TOL) & (plant_pos_p75 > IS_AC_ZERO_TOL),
+        plant_pos_p75,
+        df["expected_ac_kw"],
+    )
+
     # Per-inverter Δt (hours) to next sample, capped (same spirit as CD engine).
     max_dt_h = float(os.getenv("IS_MAX_DT_HOURS", str(5.0 / 60.0)))
     df["dt_h"] = df.groupby("inverter_id", sort=False)["timestamp"].diff().dt.total_seconds() / 3600.0

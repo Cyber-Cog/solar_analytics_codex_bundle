@@ -12,12 +12,11 @@ __pycache__/
 .env.*.local
 !.env.example
 
-# Node / Next.js
+# Node (vanilla frontend has no build tooling, but ignore stray node deps anywhere)
 node_modules/
-frontend-next/.next/
-frontend-next/node_modules/
-.next/
-next-env.d.ts
+
+# Retired Next.js tree — app UI lives under frontend/ only
+frontend-next/
 
 # Databases & dumps
 *.db

@@ -1,7 +1,11 @@
 """
 Inverter Shutdown Detection
 Rule:
-  shutdown = (ac_power == 0) AND (irradiance > 5 W/m²)
+  shutdown = (ac_power == 0) AND (irradiance > threshold W/m², default 10)
+
+Energy loss (kWh): at each timestamp, expected AC (kW) = median of inverters in the
+top quartile (>= 75th percentile) of AC among producing peers; for shutdown samples,
+incremental loss = expected_kw × Δt (per-inverter cadence, same basis as hours).
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 
-IS_IRRADIANCE_MIN = float(os.getenv("IS_IRRADIANCE_MIN", "5"))
+IS_IRRADIANCE_MIN = float(os.getenv("IS_IRRADIANCE_MIN", "10"))
 IS_AC_ZERO_TOL = float(os.getenv("IS_AC_ZERO_TOL", "0.01"))
 
 
@@ -50,6 +54,18 @@ def _pick_irradiance(df_irr: pd.DataFrame) -> dict:
     df_irr["prio"] = df_irr["signal"].map(prio).fillna(99)
     df_irr = df_irr.sort_values(["timestamp", "prio"]).drop_duplicates(["timestamp"], keep="first")
     return dict(zip(df_irr["timestamp"].astype(str), df_irr["irradiance"]))
+
+
+def _expected_kw_top_quarter_median(vals: np.ndarray) -> float:
+    """Median AC of inverters in the top quartile at one timestamp."""
+    v = vals[np.isfinite(vals)]
+    if v.size == 0:
+        return 0.0
+    thr = float(np.quantile(v, 0.75))
+    top = v[v >= thr]
+    if top.size == 0:
+        return float(np.median(v))
+    return float(np.median(top))
 
 
 def run_inverter_shutdown(
@@ -141,11 +157,27 @@ def run_inverter_shutdown(
             df["shutdown"] = df["shutdown"] & (~df["timestamp"].isin(grid_ts))
     df = df.sort_values(["inverter_id", "timestamp"]).reset_index(drop=True)
 
-    # Infer data interval
-    diffs = df.groupby("inverter_id")["timestamp"].diff().dropna()
-    dt_h = float(diffs.median().total_seconds() / 3600.0) if len(diffs) else (1.0 / 60.0)
-    if not np.isfinite(dt_h) or dt_h <= 0:
-        dt_h = 1.0 / 60.0
+    # Expected plant AC (kW) at each timestamp: median of top-quartile inverters.
+    ts_expected = (
+        df.groupby("timestamp", sort=False)["ac_kw"]
+        .apply(lambda s: _expected_kw_top_quarter_median(s.to_numpy(dtype=float)))
+        .rename("expected_ac_kw")
+    )
+    df = df.merge(ts_expected.reset_index(), on="timestamp", how="left")
+    df["expected_ac_kw"] = pd.to_numeric(df["expected_ac_kw"], errors="coerce").fillna(0.0)
+
+    # Per-inverter Δt (hours) to next sample, capped (same spirit as CD engine).
+    max_dt_h = float(os.getenv("IS_MAX_DT_HOURS", str(5.0 / 60.0)))
+    df["dt_h"] = df.groupby("inverter_id", sort=False)["timestamp"].diff().dt.total_seconds() / 3600.0
+    inv_median_dt = df.groupby("inverter_id", sort=False)["dt_h"].transform("median")
+    df["dt_h"] = df["dt_h"].fillna(inv_median_dt).fillna(1.0 / 60.0)
+    df["dt_h"] = df["dt_h"].clip(lower=1.0 / 3600.0, upper=max_dt_h)
+
+    df["loss_kwh_step"] = np.where(
+        df["shutdown"] & (df["expected_ac_kw"] > 0),
+        df["expected_ac_kw"] * df["dt_h"],
+        0.0,
+    )
 
     inv_status: List[dict] = []
     timeline: List[dict] = []
@@ -153,7 +185,8 @@ def run_inverter_shutdown(
         g = g.sort_values("timestamp")
         sh = g[g["shutdown"]]
         shutdown_points = int(len(sh))
-        shutdown_hours = round(shutdown_points * dt_h, 3)
+        shutdown_hours = round(float(sh["dt_h"].sum()), 3) if shutdown_points else 0.0
+        total_loss = float(g["loss_kwh_step"].sum())
         last_seen = str(sh["timestamp"].max()) if shutdown_points else None
         window_start = str(sh["timestamp"].min()) if shutdown_points else None
         window_end = str(sh["timestamp"].max()) if shutdown_points else None
@@ -162,20 +195,22 @@ def run_inverter_shutdown(
                 "inverter_id": inv_id,
                 "shutdown_points": shutdown_points,
                 "shutdown_hours": shutdown_hours,
+                "total_shutdown_energy_loss_kwh": round(total_loss, 2),
                 "last_seen_shutdown": last_seen,
+                "active_since_shutdown": window_start,
                 "investigation_window_start": window_start,
                 "investigation_window_end": window_end,
             }
         )
         for _, r in g.iterrows():
-            timeline.append(
-                {
-                    "timestamp": str(r["timestamp"]),
-                    "inverter_id": inv_id,
-                    "ac_power_kw": round(float(r["ac_kw"]), 3),
-                    "irradiance": round(float(r["irradiance"]), 3),
-                    "shutdown": bool(r["shutdown"]),
-                }
-            )
+            row = {
+                "timestamp": str(r["timestamp"]),
+                "inverter_id": inv_id,
+                "ac_power_kw": round(float(r["ac_kw"]), 3),
+                "irradiance": round(float(r["irradiance"]), 3),
+                "shutdown": bool(r["shutdown"]),
+                "expected_ac_kw": round(float(r["expected_ac_kw"]), 3),
+            }
+            timeline.append(row)
 
     return inv_status, timeline

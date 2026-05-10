@@ -101,36 +101,18 @@ Expected result: Analytics Lab 7-day query drops from ~2 minutes to < 3 seconds.
 
 ---
 
-## Phase 4D — Deploy the Next.js frontend
+## Phase 4D — Headless mode (optional)
 
-### Development
-
-```bash
-cd frontend-next
-npm install
-npm run dev   # starts on http://localhost:3000
-```
-
-Set `NEXT_PUBLIC_API_URL=http://localhost:8000` in `.env.local`.
-
-### Production (Vercel)
-
-1. Import the `frontend-next/` folder as a new Vercel project.
-2. Set environment variables:
-   - `NEXT_PUBLIC_API_URL=https://your-api.vercel.app`
-   - `NEXTAUTH_SECRET=<random 32-char string>`
-   - `NEXTAUTH_URL=https://your-frontend.vercel.app`
-3. Deploy.
-
-### Switch backends to Next.js-only mode
-
-Once the Next.js frontend is live, disable the legacy static frontend in FastAPI:
+The FastAPI backend can run headless if you want to serve a separate frontend
+project (e.g. a standalone Next.js app maintained in its own repository) and
+have FastAPI expose only the JSON API.
 
 ```
-SOLAR_USE_NEXTJS_FRONTEND=1
+SOLAR_DISABLE_STATIC_FRONTEND=1   # or legacy alias: SOLAR_USE_NEXTJS_FRONTEND=1
 ```
 
-This env var causes FastAPI to skip mounting `frontend/` as static files.
+This env var causes FastAPI to skip mounting `frontend/` as static files. Point
+your separate frontend at this API via its own configuration.
 
 ---
 
@@ -146,8 +128,8 @@ This env var causes FastAPI to skip mounting `frontend/` as static files.
 | `SOLAR_SNAPSHOT_READ_ONLY` | `1` | Dashboard reads from snapshots |
 | `SOLAR_SNAPSHOT_ALLOW_STALE` | `1` | Allow stale snapshots (skip live compute) |
 | `SOLAR_WARMUP_ON_BOOT` | `0` | Pre-warm snapshot cache on startup |
-| `SOLAR_USE_NEXTJS_FRONTEND` | `0` | Disable legacy static frontend mount |
-| `SOLAR_NEXTJS_URL` | — | Next.js production URL (added to CORS) |
+| `SOLAR_DISABLE_STATIC_FRONTEND` | `0` | Run API headless (skip mounting `frontend/`) |
+| `SOLAR_USE_NEXTJS_FRONTEND` | `0` | Legacy alias for `SOLAR_DISABLE_STATIC_FRONTEND` |
 | `DS_IRRADIANCE_MIN` | `150` | Minimum irradiance for DS detection |
 | `DS_CURRENT_DROP_PCT` | `0.30` | Current drop threshold (30 %) |
 | `DS_PERSISTENCE_MINUTES` | `30` | Wall-clock persistence for DS confirmation |

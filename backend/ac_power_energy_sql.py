@@ -186,6 +186,58 @@ def sql_inverter_performance_with_energy(table: str) -> str:
     """
 
 
+def sql_inverter_dc_energy_kwh(table: str) -> str:
+    """Per inverter: integrate dc_power (kW) → energy_kwh; same gap / median-step rules as AC."""
+    return f"""
+        WITH inv_step AS (
+            SELECT equipment_id, timestamp, value::double precision AS kw
+            FROM {table}
+            WHERE plant_id = :plant_id
+              AND LOWER(TRIM(equipment_level::text)) = 'inverter'
+              AND LOWER(TRIM(signal::text)) = 'dc_power'
+              AND timestamp BETWEEN :f AND :t
+        ),
+        inv_gapped AS (
+            SELECT
+                equipment_id,
+                kw,
+                EXTRACT(EPOCH FROM (
+                    LEAD(timestamp::timestamp) OVER (PARTITION BY equipment_id ORDER BY timestamp) - timestamp::timestamp
+                )) / 3600.0 AS dt_h
+            FROM inv_step
+        ),
+        step_median AS (
+            SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY dt_h) AS m
+            FROM inv_gapped
+            WHERE dt_h IS NOT NULL AND dt_h > 0 AND dt_h <= 6.0
+        ),
+        inv_energy AS (
+            SELECT
+                equipment_id,
+                SUM(
+                    kw * (
+                        CASE
+                            WHEN dt_h IS NULL THEN COALESCE((SELECT m FROM step_median), 0.25)
+                            WHEN dt_h <= 0 THEN COALESCE((SELECT m FROM step_median), 0.25)
+                            ELSE LEAST(
+                                dt_h,
+                                GREATEST(
+                                    8.0 * COALESCE((SELECT m FROM step_median), 0.25),
+                                    1.0 / 60.0
+                                )
+                            )
+                        END
+                    )
+                ) AS energy_kwh
+            FROM inv_gapped
+            GROUP BY equipment_id
+        )
+        SELECT equipment_id, energy_kwh
+        FROM inv_energy
+        ORDER BY equipment_id
+    """
+
+
 def sql_inverter_ac_daily_energy(table: str) -> str:
     """
     Per calendar day and inverter: integrated AC energy (kWh), same gap logic as

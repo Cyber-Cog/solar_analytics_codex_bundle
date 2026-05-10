@@ -352,6 +352,7 @@ async function buildUnifiedFeedClientSide(plantId, from, to) {
 
   const isCount = Number((isSummary && isSummary.active_shutdown_inverters) || 0);
   const isHours = Number((isSummary && isSummary.total_shutdown_hours) || 0);
+  const isLossMwh = Math.round(Number((isSummary && isSummary.total_shutdown_energy_loss_kwh) || 0) / 1000 * 10000) / 10000;
 
   const gbCount = Number((gbSummary && gbSummary.active_grid_events) || 0);
   const gbHours = Number((gbSummary && gbSummary.total_grid_breakdown_hours) || 0);
@@ -372,7 +373,7 @@ async function buildUnifiedFeedClientSide(plantId, from, to) {
   const categories = [
     { id: 'ds', label: 'Disconnected Strings', loss_mwh: dsLossMwh, fault_count: dsCount, metric_note: dsEnergyOk ? 'Energy loss summed over range' : (dsSummary.energy_note || 'Energy N/A') },
     { id: 'pl', label: 'Power Limitation', loss_mwh: plLossMwh, fault_count: plCount, metric_note: '10:00–15:00 window; energy loss (kWh) / 1000' },
-    { id: 'is', label: 'Inverter Shutdown', loss_mwh: 0, fault_count: isCount, metric_note: `Shutdown hours (plant total): ${isHours.toFixed(2)} h; MWh not modeled in feed` },
+    { id: 'is', label: 'Inverter Shutdown', loss_mwh: isLossMwh, fault_count: isCount, metric_note: `Shutdown hours: ${isHours.toFixed(2)} h; peer-expected loss (MWh): ${isLossMwh.toFixed(4)}` },
     { id: 'gb', label: 'Grid Breakdown', loss_mwh: 0, fault_count: gbCount, metric_note: `Breakdown hours (plant total): ${gbHours.toFixed(2)} h; MWh not modeled in feed` },
     { id: 'comm', label: 'Communication Issue', loss_mwh: commLossMwh, fault_count: commCount, metric_note: 'Hierarchical communication ownership with expected-power loss and no SCB duplicate loss' },
     { id: 'scb_perf', label: 'Soiling', loss_mwh: solLossMwh, fault_count: solCount, metric_note: 'Plant PR-regression loss + top SCB peer losses (estimated)' },
@@ -388,10 +389,10 @@ async function buildUnifiedFeedClientSide(plantId, from, to) {
 
   (dsPack.data || []).forEach((drow) => {
     const ms = Number(drow.missing_strings || drow.range_min_missing_strings || 0);
-    if (ms <= 0) return;
     const scb = drow.scb_id;
     if (!scb) return;
     const ekwh = Number(drow.energy_loss_kwh || 0);
+    const ls = drow.last_seen || drow.timestamp;
     rows.push({
       id: `ds:${scb}`,
       category: 'ds',
@@ -403,6 +404,9 @@ async function buildUnifiedFeedClientSide(plantId, from, to) {
       severity_hours: null,
       duration_note: drow.recurring_days ? `${drow.recurring_days} recurring days` : null,
       status: String(drow.fault_status || 'DS'),
+      active_since: drow.active_since || null,
+      last_seen: ls || null,
+      is_fault_active: !!drow.is_fault_active,
       investigate: { kind: 'ds', scb_id: scb },
       _sort_loss_kwh: ekwh,
     });
@@ -413,17 +417,24 @@ async function buildUnifiedFeedClientSide(plantId, from, to) {
     if (!inv) return;
     const ekwh = Number(prow.total_energy_loss_kwh || 0);
     if (ekwh <= 0) return;
+    const lsPl = prow.last_seen_fault || prow.investigation_window_end;
+    const asPl = prow.investigation_window_start;
+    const endD = (to && String(to).slice(0, 10)) || '';
+    const activePl = !!(lsPl && endD && String(lsPl).replace('T', ' ').slice(0, 10) === endD);
     rows.push({
       id: `pl:${inv}`,
       category: 'pl',
       category_label: 'Power Limitation',
-      occurred_at: String(prow.last_seen_fault || prow.investigation_window_end || `${toDay} 23:59:59`),
+      occurred_at: String(lsPl || `${toDay} 23:59:59`),
       equipment_id: inv,
       equipment_level: 'inverter',
       severity_energy_kwh: Math.round(ekwh * 10000) / 10000,
       severity_hours: null,
       duration_note: null,
       status: 'Power limitation',
+      active_since: asPl || null,
+      last_seen: lsPl || null,
+      is_fault_active: activePl,
       investigate: { kind: 'pl', inverter_id: inv },
       _sort_loss_kwh: ekwh,
     });
@@ -434,20 +445,28 @@ async function buildUnifiedFeedClientSide(plantId, from, to) {
     if (!inv) return;
     const hrs = Number(irow.shutdown_hours || 0);
     const pts = Number(irow.shutdown_points || 0);
-    if (pts <= 0 && hrs <= 0) return;
+    const ekwhIs = Number(irow.total_shutdown_energy_loss_kwh || 0);
+    if (pts <= 0 && hrs <= 0 && ekwhIs <= 0) return;
+    const lsIs = irow.last_seen_shutdown || irow.investigation_window_end;
+    const asIs = irow.active_since_shutdown || irow.investigation_window_start;
+    const endD = (to && String(to).slice(0, 10)) || '';
+    const activeIs = !!(lsIs && endD && String(lsIs).replace('T', ' ').slice(0, 10) === endD);
     rows.push({
       id: `is:${inv}`,
       category: 'is',
       category_label: 'Inverter Shutdown',
-      occurred_at: String(irow.last_seen_shutdown || irow.investigation_window_end || `${toDay} 23:59:59`),
+      occurred_at: String(lsIs || `${toDay} 23:59:59`),
       equipment_id: inv,
       equipment_level: 'inverter',
-      severity_energy_kwh: 0,
+      severity_energy_kwh: Math.round(ekwhIs * 10000) / 10000,
       severity_hours: Math.round(hrs * 10000) / 10000,
       duration_note: `${pts} points`,
       status: 'Inverter shutdown',
+      active_since: asIs || null,
+      last_seen: lsIs || null,
+      is_fault_active: activeIs,
       investigate: { kind: 'is', inverter_id: inv },
-      _sort_loss_kwh: hrs * 50,
+      _sort_loss_kwh: Math.max(ekwhIs, hrs * 50),
     });
   });
 
@@ -457,17 +476,24 @@ async function buildUnifiedFeedClientSide(plantId, from, to) {
     const hrs = Number(erow.breakdown_hours || 0);
     const pts = Number(erow.breakdown_points || 0);
     if (pts <= 0 && hrs <= 0) return;
+    const lsGb = erow.last_seen_breakdown || erow.investigation_window_end;
+    const asGb = erow.investigation_window_start;
+    const endD = (to && String(to).slice(0, 10)) || '';
+    const activeGb = !!(lsGb && endD && String(lsGb).replace('T', ' ').slice(0, 10) === endD);
     rows.push({
       id: `gb:${eid}`,
       category: 'gb',
       category_label: 'Grid Breakdown',
-      occurred_at: String(erow.last_seen_breakdown || erow.investigation_window_end || `${toDay} 23:59:59`),
+      occurred_at: String(lsGb || `${toDay} 23:59:59`),
       equipment_id: String(eid),
       equipment_level: 'plant_event',
       severity_energy_kwh: 0,
       severity_hours: Math.round(hrs * 10000) / 10000,
       duration_note: `${pts} points`,
       status: 'Grid breakdown',
+      active_since: asGb || null,
+      last_seen: lsGb || null,
+      is_fault_active: activeGb,
       investigate: { kind: 'gb', event_id: String(eid) },
       _sort_loss_kwh: hrs * 100,
     });
@@ -481,17 +507,24 @@ async function buildUnifiedFeedClientSide(plantId, from, to) {
     const pts = Number(crow.communication_points || 0);
     const ekwh = Number(crow.estimated_loss_kwh || 0);
     const issueKind = String(crow.issue_kind || '');
+    const lsC = crow.last_seen_communication || crow.investigation_window_end;
+    const asC = crow.investigation_window_start;
+    const endD = (to && String(to).slice(0, 10)) || '';
+    const activeC = !!(lsC && endD && String(lsC).replace('T', ' ').slice(0, 10) === endD);
     rows.push({
       id: `comm:${eqLevel}:${eqId}:${issueKind || 'event'}`,
       category: 'comm',
       category_label: 'Communication Issue',
-      occurred_at: String(crow.last_seen_communication || crow.investigation_window_end || `${toDay} 23:59:59`),
+      occurred_at: String(lsC || `${toDay} 23:59:59`),
       equipment_id: String(eqId),
       equipment_level: String(eqLevel),
       severity_energy_kwh: Math.round(ekwh * 10000) / 10000,
       severity_hours: Math.round(hrs * 10000) / 10000,
       duration_note: `${Number(crow.communication_windows || 0)} windows / ${pts} points`,
       status: String(crow.status || 'Communication issue'),
+      active_since: asC || null,
+      last_seen: lsC || null,
+      is_fault_active: activeC,
       investigate: { kind: 'comm', equipment_level: String(eqLevel), equipment_id: String(eqId), issue_kind: issueKind || undefined, inverter_id: crow.inverter_id ? String(crow.inverter_id) : undefined },
       _sort_loss_kwh: ekwh > 0 ? ekwh : (hrs * 25),
     });
@@ -512,6 +545,9 @@ async function buildUnifiedFeedClientSide(plantId, from, to) {
       severity_hours: null,
       duration_note: 'Peer-based estimate (range)',
       status: 'Soiling (est.)',
+      active_since: null,
+      last_seen: `${toDay} 12:00:00`,
+      is_fault_active: false,
       investigate: { kind: 'scb_perf', scb_id: sid },
       _sort_loss_kwh: lm * 1000,
     });

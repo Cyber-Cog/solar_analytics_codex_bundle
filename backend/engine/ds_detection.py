@@ -70,6 +70,9 @@ DS_VOLTAGE_TOL_PCT = float(os.getenv("DS_VOLTAGE_TOL_PCT", "10"))
 DS_ROLLING_MEDIAN_WINDOW = int(os.getenv("DS_ROLLING_MEDIAN_WINDOW", "5"))
 DS_ZERO_EXPORT_KW_MIN = float(os.getenv("DS_ZERO_EXPORT_KW_MIN", "0.5"))
 DS_ZERO_EXPORT_MEDIAN_RATIO = float(os.getenv("DS_ZERO_EXPORT_MEDIAN_RATIO", "0.02"))
+# MPPT-only: lift reference toward max peer per-string current so one disconnected MPPT
+# (no clipping) is not masked when siblings clip (ref from p75 alone can sit too low).
+DS_MPPT_REF_FROM_MAX_PEER_FRAC = float(os.getenv("DS_MPPT_REF_FROM_MAX_PEER_FRAC", "0.98"))
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -776,7 +779,8 @@ def run_ds_detection(plant_id: str, df: pd.DataFrame, db: Session):
         ref_series = df.groupby(["timestamp", "inverter_id"])["per_string_current"].transform(
             lambda s: float(np.nanpercentile(s.to_numpy(dtype=float), 75))
         )
-        df["ref_current"] = ref_series
+        peer_max = df.groupby(["timestamp", "inverter_id"])["per_string_current"].transform("max")
+        df["ref_current"] = np.maximum(ref_series, peer_max * DS_MPPT_REF_FROM_MAX_PEER_FRAC)
     else:
         ref_series = df.groupby(
             ["timestamp", "inverter_id"], group_keys=False

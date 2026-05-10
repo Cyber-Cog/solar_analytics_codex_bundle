@@ -717,7 +717,7 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
     const tq = ufTextQ.trim().toLowerCase();
     if (tq) {
       r = r.filter((row) => {
-        const blob = [row.category_label, row.status, row.equipment_id, row.occurred_at, row.duration_note]
+        const blob = [row.category_label, row.status, row.equipment_id, row.occurred_at, row.duration_note, row.active_since, row.last_seen]
           .map((x) => String(x || '').toLowerCase()).join(' ');
         return blob.includes(tq);
       });
@@ -728,19 +728,42 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
   const tileCategories = unifiedFeed?.categories || [];
   const sumTileMwh = useMemo(() => tileCategories.reduce((s, c) => s + (Number(c.loss_mwh) || 0), 0), [tileCategories]);
   const sumTileCnt = useMemo(() => tileCategories.reduce((s, c) => s + (Number(c.fault_count) || 0), 0), [tileCategories]);
+  const sumTileDcMw = useMemo(() => tileCategories.reduce((s, c) => {
+    const m = c.dc_impact && c.dc_impact.impact_dc_mw;
+    return s + (m != null && Number.isFinite(Number(m)) ? Number(m) : 0);
+  }, 0), [tileCategories]);
 
   const tileValueForCat = (c) => {
-    if (metricToggle === 'mwh') return { val: Number(c.loss_mwh || 0).toFixed(3), unit: 'MWh' };
-    if (metricToggle === 'count') return { val: String(c.fault_count ?? 0), unit: 'faults' };
-    if (sumTileMwh > 1e-9) return { val: `${(((Number(c.loss_mwh) || 0) / sumTileMwh) * 100).toFixed(1)}`, unit: '% of MWh' };
-    if (sumTileCnt > 0) return { val: `${(((Number(c.fault_count) || 0) / sumTileCnt) * 100).toFixed(1)}`, unit: '% of faults' };
-    return { val: '—', unit: '%' };
+    if (metricToggle === 'mwh') return { val: Number(c.loss_mwh || 0).toFixed(3), unit: 'MWh', sub: null };
+    if (metricToggle === 'count') return { val: String(c.fault_count ?? 0), unit: 'faults', sub: null };
+    if (metricToggle === 'dc') {
+      const d = c.dc_impact || {};
+      const mw = d.impact_dc_mw;
+      const pct = d.impact_dc_pct_of_plant;
+      if (mw == null || !Number.isFinite(Number(mw))) return { val: '—', unit: 'MW DC_eq', sub: null };
+      const sub = pct != null && Number.isFinite(Number(pct))
+        ? `${Number(pct).toFixed(2)}% of plant DC`
+        : null;
+      return { val: Number(mw).toFixed(3), unit: 'MW DC_eq', sub };
+    }
+    if (sumTileMwh > 1e-9) return { val: `${(((Number(c.loss_mwh) || 0) / sumTileMwh) * 100).toFixed(1)}`, unit: '% of MWh', sub: null };
+    if (sumTileCnt > 0) return { val: `${(((Number(c.fault_count) || 0) / sumTileCnt) * 100).toFixed(1)}`, unit: '% of faults', sub: null };
+    return { val: '—', unit: '%', sub: null };
   };
 
   const totalTileValue = () => {
-    if (metricToggle === 'mwh') return { val: sumTileMwh.toFixed(3), unit: 'MWh' };
-    if (metricToggle === 'count') return { val: String(sumTileCnt), unit: 'faults' };
-    return { val: '100', unit: '%' };
+    if (metricToggle === 'mwh') return { val: sumTileMwh.toFixed(3), unit: 'MWh', sub: null };
+    if (metricToggle === 'count') return { val: String(sumTileCnt), unit: 'faults', sub: null };
+    if (metricToggle === 'dc') {
+      const tMw = unifiedFeed && unifiedFeed.totals && unifiedFeed.totals.dc_impact_total_mw;
+      const v = tMw != null && Number.isFinite(Number(tMw)) ? Number(tMw) : sumTileDcMw;
+      const pdc = unifiedFeed && unifiedFeed.totals && unifiedFeed.totals.plant_total_dc_mw;
+      const sub = pdc != null && Number.isFinite(Number(pdc)) && Number(pdc) > 1e-9
+        ? `${((v / Number(pdc)) * 100).toFixed(2)}% of ${Number(pdc).toFixed(2)} MW DC (plant)`
+        : null;
+      return { val: v.toFixed(3), unit: 'MW DC_eq', sub };
+    }
+    return { val: '100', unit: '%', sub: null };
   };
 
   const ufPageRows = useMemo(() => {
@@ -750,10 +773,29 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
 
   const ufTotalPages = Math.max(1, Math.ceil(unifiedFiltered.length / UF_PAGE_SIZE));
 
+  const ufFmtTs = (v) => {
+    if (v == null || v === '') return '—';
+    return String(v).replace('T', ' ').slice(0, 19);
+  };
+
   const ufTableColumns = useMemo(() => [
-    { key: 'occurred_at', label: 'Date / time', sortValue: (row) => String(row.occurred_at || ''), render: (row) => h('span', { style: { fontSize: 12 } }, String(row.occurred_at || '—').replace('T', ' ').slice(0, 19)), csvValue: (row) => row.occurred_at },
+    { key: 'occurred_at', label: 'Date / time', sortValue: (row) => String(row.occurred_at || ''), render: (row) => h('span', { style: { fontSize: 12 } }, ufFmtTs(row.occurred_at)), csvValue: (row) => row.occurred_at },
     { key: 'category_label', label: 'Category', sortValue: (row) => row.category_label || '', csvValue: (row) => row.category_label },
     { key: 'equipment_id', label: 'Equipment', render: (row) => h('strong', null, row.equipment_id || '—'), csvValue: (row) => row.equipment_id },
+    { key: 'active_since', label: 'Active since', sortValue: (row) => String(row.active_since || ''), render: (row) => h('span', { style: { fontSize: 12 } }, ufFmtTs(row.active_since)), csvValue: (row) => row.active_since },
+    { key: 'last_seen', label: 'Last seen', sortValue: (row) => String(row.last_seen || ''), render: (row) => h('span', { style: { fontSize: 12 } }, ufFmtTs(row.last_seen)), csvValue: (row) => row.last_seen },
+    {
+      key: 'is_fault_active',
+      label: 'Active',
+      sortValue: (row) => (row.is_fault_active ? 1 : 0),
+      render: (row) => (row.is_fault_active
+        ? h('span', {
+          title: 'Fault still present on the last day of the selected range',
+          style: { color: '#16a34a', fontSize: 18, lineHeight: 1, fontWeight: 700 },
+        }, '\u25CF')
+        : h('span', { style: { color: 'var(--text-soft)', fontSize: 12 } }, '—')),
+      csvValue: (row) => (row.is_fault_active ? 'yes' : ''),
+    },
     { key: 'severity_energy_kwh', label: 'Loss (kWh)', sortValue: (row) => row.severity_energy_kwh ?? -Infinity, render: (row) => (Number(row.severity_energy_kwh) || 0).toFixed(2), csvValue: (row) => row.severity_energy_kwh },
     { key: 'severity_hours', label: 'Hours', sortValue: (row) => row.severity_hours ?? -Infinity, render: (row) => (row.severity_hours != null ? Number(row.severity_hours).toFixed(2) : '—'), csvValue: (row) => row.severity_hours },
     { key: 'duration_note', label: 'Duration / note', sortValue: (row) => row.duration_note || '', render: (row) => row.duration_note || '—', csvValue: (row) => row.duration_note },
@@ -804,12 +846,12 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
           h('p', { className: 'fault-overview-sub' }, 'Click a KPI card to open that fault category.'),
         ),
         h('div', { className: 'fault-overview-metric-seg', role: 'group', 'aria-label': 'KPI metric' },
-          ['mwh', 'count', 'pct'].map((m) => h('button', {
+          ['mwh', 'count', 'pct', 'dc'].map((m) => h('button', {
             key: m,
             type: 'button',
             className: `btn fault-metric-btn ${metricToggle === m ? 'btn-primary' : 'btn-outline'}`,
             onClick: () => setMetricToggle(m),
-          }, m === 'mwh' ? 'MWh' : m === 'count' ? '# Faults' : '% of total'))
+          }, m === 'mwh' ? 'MWh' : m === 'count' ? '# Faults' : m === 'pct' ? '% of total' : 'DC impact'))
         ),
       ),
       unifiedLoading && h('div', { className: 'fault-overview-loading', role: 'status' },
@@ -862,12 +904,15 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
               comm:     { color: '#06b6d4', tint: 'rgba(6,182,212,0.14)',   abbr: 'CM'  },
               scb_perf: { color: '#84cc16', tint: 'rgba(132,204,22,0.14)',  abbr: 'SL'  },
               inv_eff:  { color: '#2563eb', tint: 'rgba(37,99,235,0.14)',   abbr: 'IE'  },
+              clip:     { color: '#eab308', tint: 'rgba(234,179,8,0.14)',   abbr: 'CL'  },
+              derate:   { color: '#6366f1', tint: 'rgba(99,102,241,0.14)',  abbr: 'DR'  },
               damage:   { color: '#f97316', tint: 'rgba(249,115,22,0.14)',  abbr: 'BP'  },
             };
             const tv = totalTileValue();
             const sharePct = (v) => {
               if (metricToggle === 'mwh') return sumTileMwh > 1e-9 ? Math.min(100, (Number(v) || 0) / sumTileMwh * 100) : 0;
               if (metricToggle === 'count') return sumTileCnt > 0 ? Math.min(100, (Number(v) || 0) / sumTileCnt * 100) : 0;
+              if (metricToggle === 'dc') return sumTileDcMw > 1e-9 ? Math.min(100, (Number(v) || 0) / sumTileDcMw * 100) : 0;
               return Math.min(100, Number(v) || 0);
             };
             const totalStyle = CAT_STYLE.total;
@@ -885,17 +930,23 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
                 ),
                 h('div', { className: 'fo-value' }, tv.val),
                 h('div', { className: 'fo-unit' }, tv.unit),
+                tv.sub && h('div', { className: 'fo-note', style: { marginTop: 4 } }, tv.sub),
                 h('div', { className: 'fo-share' }, h('div', { className: 'fo-share-fill' })),
                 h('div', { className: 'fo-note' },
                   metricToggle === 'pct'
                     ? 'Across all fault categories (same metric)'
-                    : 'Sum of per-category values shown on cards'),
+                    : metricToggle === 'dc'
+                      ? 'Sum of category DC-equivalent impacts (loss MWh ÷ mean DC yield on affected inverters)'
+                      : 'Sum of per-category values shown on cards'),
               ),
               ...tileCategories.map((c) => {
                 const t = tileValueForCat(c);
                 const style = CAT_STYLE[c.id] || { color: 'var(--accent)', tint: 'rgba(62,183,223,0.10)', abbr: '—' };
                 const metricRaw = metricToggle === 'mwh' ? (Number(c.loss_mwh) || 0)
                                  : metricToggle === 'count' ? (Number(c.fault_count) || 0)
+                                 : metricToggle === 'dc'
+                                   ? (c.dc_impact && c.dc_impact.impact_dc_mw != null && Number.isFinite(Number(c.dc_impact.impact_dc_mw))
+                                     ? Number(c.dc_impact.impact_dc_mw) : 0)
                                  : (sumTileMwh > 1e-9 ? (Number(c.loss_mwh) || 0) / sumTileMwh * 100 : 0);
                 const share = sharePct(metricRaw);
                 const isZero = metricRaw <= 1e-9;
@@ -913,8 +964,10 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
                   ),
                   h('div', { className: 'fo-value' }, t.val),
                   h('div', { className: 'fo-unit' }, t.unit),
+                  t.sub && h('div', { className: 'fo-note', style: { marginTop: 4 } }, t.sub),
                   h('div', { className: 'fo-share' }, h('div', { className: 'fo-share-fill' })),
-                  c.metric_note && h('div', { className: 'fo-note' }, c.metric_note),
+                  metricToggle !== 'dc' && c.metric_note && h('div', { className: 'fo-note' }, c.metric_note),
+                  metricToggle === 'dc' && c.metric_note && h('div', { className: 'fo-note', style: { opacity: 0.85, fontSize: 11 } }, c.metric_note),
                 );
               }),
             ];

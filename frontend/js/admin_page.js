@@ -45,6 +45,11 @@ window.AdminPage = (props = {}) => {
   });
   const [precomputeLoading, setPrecomputeLoading] = useState(false);
   const [precomputeEnqueuing, setPrecomputeEnqueuing] = useState(false);
+  /** 'full' = omit modules (entire pipeline). 'custom' = send checked module ids. */
+  const [precomputeScope, setPrecomputeScope] = useState('full');
+  /** id -> checked when scope is custom */
+  const [precomputeModuleSel, setPrecomputeModuleSel] = useState({});
+  const [precomputeCatalog, setPrecomputeCatalog] = useState(null);
 
   useEffect(() => {
     setAppearanceDraft(orgDefaultTheme || 'photon');
@@ -352,12 +357,33 @@ window.AdminPage = (props = {}) => {
     if (activeTab === 'precompute') loadPrecomputeQueue();
   }, [activeTab]);
 
+  useEffect(() => {
+    if (activeTab !== 'precompute') return;
+    if (!window.SolarAPI || !window.SolarAPI.Admin || !window.SolarAPI.Admin.precomputeModules) return;
+    window.SolarAPI.Admin.precomputeModules()
+      .then(setPrecomputeCatalog)
+      .catch(() => setPrecomputeCatalog(null));
+  }, [activeTab]);
+
+  const precomputeCatalogList = (precomputeCatalog && precomputeCatalog.modules) ? precomputeCatalog.modules : [];
+  const precomputeModSelFromIds = (ids) => {
+    const o = {};
+    (ids || []).forEach((id) => { o[id] = true; });
+    return o;
+  };
+
   const handlePrecomputeEnqueue = async () => {
     if (!precomputeForm.allPlants && !String(precomputeForm.plantId || '').trim()) {
       return alert('Choose a plant or check “All plants”.');
     }
     if (!window.SolarAPI.Admin.precomputeEnqueue) {
       return alert('Update the app: precompute API not available.');
+    }
+    if (precomputeScope === 'custom') {
+      const picked = precomputeCatalogList.map((m) => m.id).filter((id) => precomputeModuleSel[id]);
+      if (!picked.length) {
+        return alert('Select at least one module, or switch to “Full pipeline”.');
+      }
     }
     setPrecomputeEnqueuing(true);
     try {
@@ -367,8 +393,15 @@ window.AdminPage = (props = {}) => {
         date_to: String(precomputeForm.dateTo || '').trim() || null,
         chunk_days: Math.max(0, parseInt(precomputeForm.chunkDays, 10) || 0),
       };
+      if (precomputeScope === 'custom') {
+        const picked = precomputeCatalogList.map((m) => m.id).filter((id) => precomputeModuleSel[id]);
+        body.modules = picked;
+      }
       const r = await window.SolarAPI.Admin.precomputeEnqueue(body);
-      const msg = `Enqueued ${r.jobs_enqueued} job(s) for: ${(r.plants_touched || []).join(', ') || '—'}\n\n${r.worker_hint || ''}`;
+      const modNote = (precomputeScope === 'custom' && body.modules && body.modules.length)
+        ? `\n\nModules: ${body.modules.join(', ')}`
+        : '\n\nModules: full pipeline';
+      const msg = `Enqueued ${r.jobs_enqueued} job(s) for: ${(r.plants_touched || []).join(', ') || '—'}${modNote}\n\n${r.worker_hint || ''}`;
       alert(msg);
       loadPrecomputeQueue();
     } catch (e) {
@@ -392,7 +425,7 @@ window.AdminPage = (props = {}) => {
   const TAB_DEFS = [
     { id: 'users', label: 'Users & Access' },
     { id: 'appearance', label: 'Appearance' },
-    { id: 'precompute', label: 'Analytics precompute' },
+    { id: 'precompute', label: 'Snapshots & precompute' },
     { id: 'performance', label: '⚡ Performance' },
   ];
 
@@ -498,12 +531,12 @@ window.AdminPage = (props = {}) => {
 
     // ── Analytics precompute (historical + manual repair) ─────────────────
     activeTab === 'precompute' && h(React.Fragment, null,
-      h(Card, { title: 'Durable precompute queue' },
+      h(Card, { title: 'Snapshot & fault precompute (queue)' },
         h('p', { style: { fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 } },
-          'Fills module snapshot tables (DS summary, unified fault feed, loss bridge) and warms fault tab caches for the selected date range. ' +
-          'If automatic precompute after upload fails, use this. Leave dates empty to use each plant’s raw data min/max. ' +
-          'Set chunk size (e.g. 62 days) to split long history into many small jobs so the background worker can finish them reliably. ' +
-          'For a single action that runs all fault engines with a progress bar and ETA, use the Performance tab (Run full fault & snapshot pipeline).'
+          'Queue durable jobs for the background worker (`python -m jobs.precompute_runner --once` from the backend folder). ' +
+          'Pick one or more plants, an optional date range, and either the full pipeline or specific modules. ' +
+          'Leave both dates empty to use each plant’s raw-data min/max. Use chunk days (e.g. 62) to split long ranges into smaller jobs. ' +
+          'For an in-process run with a progress bar on this server, use the Performance tab.'
         ),
         h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center', marginBottom: 12 } },
           h('label', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' } },
@@ -520,7 +553,7 @@ window.AdminPage = (props = {}) => {
             (plants || []).map((p) => h('option', { key: p.plant_id, value: p.plant_id }, p.plant_id))
           ),
         ),
-        h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 10, marginBottom: 10 } },
+        h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 10, marginBottom: 14 } },
           h('div', { className: 'form-group' },
             h('label', { className: 'form-label' }, 'From (optional)'),
             h('input', { className: 'form-input', type: 'date', value: precomputeForm.dateFrom, onChange: (e) => setPrecomputeForm({ ...precomputeForm, dateFrom: e.target.value }) }),
@@ -542,6 +575,104 @@ window.AdminPage = (props = {}) => {
             h('div', { style: { fontSize: 10, color: 'var(--text-muted)' } }, '0 = one job for full range'),
           ),
         ),
+        h('div', { className: 'form-group', style: { marginBottom: 12 } },
+          h('label', { className: 'form-label' }, 'What to compute'),
+          h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10, marginTop: 6 } },
+            h('label', { style: { display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer', fontSize: 13 } },
+              h('input', {
+                type: 'radio',
+                name: 'precompute_scope',
+                checked: precomputeScope === 'full',
+                onChange: () => setPrecomputeScope('full'),
+              }),
+              h('span', null, h('strong', null, 'Full pipeline — '), 'all stored snapshots (DS, unified, loss) plus all fault-tab engines (PL, IS, GB, communication, clipping/derating). Recommended after large uploads.'),
+            ),
+            h('label', { style: { display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer', fontSize: 13 } },
+              h('input', {
+                type: 'radio',
+                name: 'precompute_scope',
+                checked: precomputeScope === 'custom',
+                onChange: () => {
+                  setPrecomputeScope('custom');
+                  setPrecomputeModuleSel((prev) => {
+                    if (precomputeCatalogList.length && Object.keys(prev).length === 0) {
+                      return precomputeModSelFromIds(precomputeCatalogList.map((m) => m.id));
+                    }
+                    return prev;
+                  });
+                },
+              }),
+              h('span', null, h('strong', null, 'Custom — '), 'only the modules you tick below (faster repairs, e.g. unified + inverter shutdown).'),
+            ),
+          ),
+        ),
+        precomputeScope === 'custom' && precomputeCatalogList.length > 0 && h('div', {
+          style: {
+            border: '1px solid var(--line)',
+            borderRadius: 10,
+            padding: 12,
+            marginBottom: 12,
+            background: 'var(--panel)',
+          },
+        },
+          h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 10, alignItems: 'center' } },
+            h('span', { style: { fontSize: 12, fontWeight: 600 } }, 'Quick presets'),
+            h('button', {
+              type: 'button',
+              className: 'btn btn-outline',
+              style: { fontSize: 11, padding: '4px 10px' },
+              onClick: () => setPrecomputeModuleSel(precomputeModSelFromIds(precomputeCatalogList.map((m) => m.id))),
+            }, 'Select all'),
+            h('button', {
+              type: 'button',
+              className: 'btn btn-outline',
+              style: { fontSize: 11, padding: '4px 10px' },
+              onClick: () => setPrecomputeModuleSel({}),
+            }, 'Clear'),
+            h('button', {
+              type: 'button',
+              className: 'btn btn-outline',
+              style: { fontSize: 11, padding: '4px 10px' },
+              onClick: () => setPrecomputeModuleSel(precomputeModSelFromIds(['ds_summary', 'ds_status', 'unified', 'loss_bridge'])),
+            }, 'Snapshots only'),
+            h('button', {
+              type: 'button',
+              className: 'btn btn-outline',
+              style: { fontSize: 11, padding: '4px 10px' },
+              onClick: () => setPrecomputeModuleSel(precomputeModSelFromIds(['pl', 'is', 'gb', 'comm', 'cd'])),
+            }, 'Fault engines only'),
+            h('button', {
+              type: 'button',
+              className: 'btn btn-outline',
+              style: { fontSize: 11, padding: '4px 10px' },
+              onClick: () => setPrecomputeModuleSel(precomputeModSelFromIds(['unified', 'is'])),
+            }, 'Overview + inverter shutdown'),
+          ),
+          ['snapshots', 'fault_engines'].map((gk) => {
+            const rows = precomputeCatalogList.filter((m) => m.group === gk);
+            if (!rows.length) return null;
+            const title = gk === 'snapshots' ? 'Stored snapshots' : 'Fault tab engines';
+            return h('div', { key: gk, style: { marginBottom: 12 } },
+              h('div', { style: { fontSize: 12, fontWeight: 600, marginBottom: 6 } }, title),
+              rows.map((m) => h('label', {
+                key: m.id,
+                style: { display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 12, marginBottom: 6, cursor: 'pointer' },
+              },
+                h('input', {
+                  type: 'checkbox',
+                  checked: !!precomputeModuleSel[m.id],
+                  onChange: () => setPrecomputeModuleSel((prev) => ({ ...prev, [m.id]: !prev[m.id] })),
+                }),
+                h('span', null,
+                  h('strong', null, m.label),
+                  m.description && h('span', { style: { color: 'var(--text-muted)', display: 'block', fontWeight: 400, marginTop: 2 } }, m.description),
+                ),
+              )),
+            );
+          }),
+        ),
+        precomputeScope === 'custom' && !precomputeCatalogList.length && h('p', { style: { fontSize: 12, color: 'var(--text-muted)' } },
+          'Module list could not be loaded. You can still enqueue the full pipeline, or reload this page as admin.'),
         h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' } },
           h('button', { className: 'btn btn-primary', disabled: precomputeEnqueuing, onClick: handlePrecomputeEnqueue },
             precomputeEnqueuing ? 'Enqueueing…' : 'Enqueue precompute jobs'),
@@ -565,6 +696,7 @@ window.AdminPage = (props = {}) => {
               style: { fontSize: 11, borderBottom: '1px solid var(--line)', padding: '6px 0', color: 'var(--text)' },
             },
               h('div', null, h('code', null, j.plant_id), '  ', h(Badge, { type: j.status === 'done' ? 'green' : (j.status === 'failed' ? 'red' : 'amber') }, j.status || '')),
+              h('div', { style: { color: 'var(--text-muted)', fontSize: 10 } }, 'Modules: ', j.modules_label || 'full pipeline'),
               h('div', { style: { color: 'var(--text-muted)' } }, (j.date_from || '') + ' → ' + (j.date_to || ''), (j.error_message ? ' — ' + j.error_message : '')),
             )),
           ),

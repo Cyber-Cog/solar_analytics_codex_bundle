@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 
 from database import get_db
+from precompute_catalog import PRECOMPUTE_MODULE_CATALOG, normalize_precompute_module_ids
 from models import (
     User, Plant, RawDataGeneric, DCHierarchyDerived, PlantArchitecture,
     EquipmentSpec, SupportTicket, FaultDiagnostics, FaultEpisode,
@@ -269,6 +270,26 @@ class PrecomputeEnqueueBody(BaseModel):
         le=366,
         description="Split range into N-day jobs (0 = one job per plant for full range).",
     )
+    modules: Optional[List[str]] = Field(
+        default=None,
+        description="Optional subset: ids from GET /api/admin/precompute/modules. Omit for full pipeline.",
+    )
+
+
+@router.get("/precompute/modules")
+def get_precompute_modules_catalog(_admin: User = Depends(check_admin)):
+    """Canonical module ids + labels for the Admin precompute UI."""
+    by_group: dict = {}
+    for row in PRECOMPUTE_MODULE_CATALOG:
+        by_group.setdefault(row["group"], []).append(row)
+    return {
+        "modules": PRECOMPUTE_MODULE_CATALOG,
+        "group_order": [
+            {"id": "snapshots", "title": "Stored snapshots (fast overview & loss pages)"},
+            {"id": "fault_engines", "title": "Fault diagnostics engines (tab payloads in DB)"},
+        ],
+        "grouped": by_group,
+    }
 
 
 @router.get("/precompute/queue")
@@ -286,6 +307,19 @@ def get_precompute_queue(
         .limit(limit)
         .all()
     )
+    def _modules_label(job: PrecomputeJob) -> str:
+        raw = getattr(job, "job_spec_json", None)
+        if not raw:
+            return "full pipeline"
+        try:
+            d = json.loads(raw)
+            m = d.get("modules") if isinstance(d, dict) else None
+            if not isinstance(m, list) or not m:
+                return "full pipeline"
+            return ", ".join(str(x) for x in m)
+        except Exception:
+            return "full pipeline"
+
     return {
         "pending": pending,
         "running": running,
@@ -299,6 +333,7 @@ def get_precompute_queue(
                 "date_to": j.date_to,
                 "status": j.status,
                 "attempts": j.attempts,
+                "modules_label": _modules_label(j),
                 "error_message": (j.error_message or "")[:500] or None,
                 "created_at": j.created_at.isoformat() if j.created_at else None,
                 "updated_at": j.updated_at.isoformat() if j.updated_at else None,
@@ -356,8 +391,8 @@ def enqueue_precompute_historical(
     """
     Enqueue one or more snapshot jobs in `precompute_jobs` (no merge — supports historical chunks).
 
-    Processes DS summary, unified feed, loss bridge, and fault tab caches
-    (via `module_precompute.compute_snapshots_for_range` + underlying engines).
+    Processes selected snapshot rows and/or fault tab engines
+    (via `module_precompute.compute_snapshots_for_range`). Omit ``modules`` for the full pipeline.
     """
     if os.environ.get("SOLAR_MODULE_PRECOMPUTE", "1").strip().lower() in ("0", "false", "no"):
         raise HTTPException(
@@ -371,6 +406,13 @@ def enqueue_precompute_historical(
         )
     from jobs.enqueue import enqueue_historical_backfill
 
+    mod_arg: Optional[List[str]] = None
+    if payload.modules is not None:
+        try:
+            mod_arg = normalize_precompute_module_ids(list(payload.modules))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     try:
         out = enqueue_historical_backfill(
             db,
@@ -378,6 +420,7 @@ def enqueue_precompute_historical(
             date_from=payload.date_from,
             date_to=payload.date_to,
             chunk_days=payload.chunk_days,
+            modules=mod_arg,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

@@ -59,17 +59,19 @@ router = APIRouter(prefix="/api/faults", tags=["Faults"])
 
 # Bump when DS summary JSON semantics change so DB snapshots are recomputed even if still "fresh" vs raw_data_stats.
 DS_SUMMARY_PAYLOAD_VERSION = 9
-UNIFIED_FAULT_PAYLOAD_VERSION = 10
+# Bump when unified-feed category semantics change (e.g. IS energy/count) so DB
+# unified_fault_snapshot rows are not served stale for exact date_from/date_to keys.
+UNIFIED_FAULT_PAYLOAD_VERSION = 11
 GB_TAB_PAYLOAD_VERSION = 2
 DS_MIN_CONFIRMED_POINTS = int(os.getenv("DS_MIN_CONFIRMED_POINTS", "3"))
 
 _MEM_PL_PAGE = "faults_pl_page_v2"
-_MEM_IS_TAB = "faults_is_tab_v6_ts_align_expected"
+_MEM_IS_TAB = "faults_is_tab_v7_unified_payload_v11"
 _MEM_GB_TAB = "faults_gb_tab_v4_pr_loss"
 _MEM_COMM_TAB = "faults_comm_tab_v2"
 _MEM_INV_EFF_AGG = "faults_inv_eff_agg_v3"
 _MEM_CD_TAB = "faults_cd_tab_v3_fast"
-_MEM_RUNTIME_TABS_BUNDLE = "faults_runtime_tabs_bundle_v12_is_ts_align"
+_MEM_RUNTIME_TABS_BUNDLE = "faults_runtime_tabs_bundle_v13_unified_v11"
 
 def _compute_inv_eff_aggregate(
     db: Session, plant_id: str, _from: str, _to: str

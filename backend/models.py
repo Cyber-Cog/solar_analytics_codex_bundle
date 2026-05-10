@@ -478,6 +478,8 @@ class PrecomputeJob(Base):
     worker_id = Column(String(64), nullable=True)
     locked_at = Column(DateTime, nullable=True)
     error_message = Column(Text, nullable=True)
+    # Optional JSON: {"modules": ["unified", "is", ...]} — omit or null = run full pipeline.
+    job_spec_json = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 

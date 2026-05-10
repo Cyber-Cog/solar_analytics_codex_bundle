@@ -81,7 +81,7 @@ def claim_next_job(conn, worker_id: str):
                    worker_id = :wid
               FROM c
              WHERE j.id = c.id
-         RETURNING j.id, j.plant_id, j.date_from, j.date_to, j.attempts, j.max_attempts
+         RETURNING j.id, j.plant_id, j.date_from, j.date_to, j.attempts, j.max_attempts, j.job_spec_json
             """
         ),
         {"wid": worker_id},
@@ -98,6 +98,9 @@ def run_job(row) -> None:
     date_from = str(row[2])
     date_to = str(row[3])
     max_attempts = int(row[5] or 5)
+    job_spec_json = None
+    if len(row) > 6 and row[6] is not None:
+        job_spec_json = str(row[6])
 
     db = SessionLocal()
     t0 = time.monotonic()
@@ -106,7 +109,9 @@ def run_job(row) -> None:
         user = db.query(User).first()
         if user is None:
             raise RuntimeError("No users in database; cannot run precompute")
-        compute_snapshots_for_range(db, plant_id, date_from, date_to, user)
+        compute_snapshots_for_range(
+            db, plant_id, date_from, date_to, user, job_spec_json=job_spec_json
+        )
         elapsed = int(time.monotonic() - t0)
         update_plant_compute_status(
             db,

@@ -6,6 +6,7 @@ Workers: `python -m jobs.precompute_runner --once` (cron / systemd / ECS schedul
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from datetime import datetime
@@ -15,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from models import PrecomputeJob
 from module_precompute import resolve_recompute_day_range
+from precompute_catalog import job_spec_for_modules_list
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +62,8 @@ def add_isolated_precompute_job(
     plant_id: str,
     date_from: str,
     date_to: str,
+    *,
+    job_spec_json: Optional[str] = None,
 ) -> None:
     """
     Insert a new pending job without merging into existing pending rows.
@@ -78,6 +82,7 @@ def add_isolated_precompute_job(
             status="pending",
             attempts=0,
             max_attempts=int(os.environ.get("SOLAR_PRECOMPUTE_MAX_ATTEMPTS", "5")),
+            job_spec_json=job_spec_json,
         )
     )
 
@@ -89,6 +94,7 @@ def enqueue_historical_backfill(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     chunk_days: int = 62,
+    modules: Optional[list[str]] = None,
 ) -> dict:
     """
     Enqueue precompute for existing raw data (one or all plants).
@@ -109,6 +115,12 @@ def enqueue_historical_backfill(
         plant_list = [p]
     else:
         plant_list = db.query(Plant).all()
+
+    spec_json: Optional[str] = None
+    if modules is not None:
+        spec_obj = job_spec_for_modules_list(list(modules))
+        if spec_obj:
+            spec_json = json.dumps(spec_obj, separators=(",", ":"))
 
     total_jobs = 0
     touched: list[str] = []
@@ -131,14 +143,14 @@ def enqueue_historical_backfill(
         a = date.fromisoformat(d0)
         b = date.fromisoformat(d1)
         if chunk_days == 0:
-            add_isolated_precompute_job(db, pid, d0, d1)
+            add_isolated_precompute_job(db, pid, d0, d1, job_spec_json=spec_json)
             total_jobs += 1
         else:
             cur = a
             while cur <= b:
                 end = min(cur + timedelta(days=chunk_days - 1), b)
                 add_isolated_precompute_job(
-                    db, pid, cur.isoformat(), end.isoformat()
+                    db, pid, cur.isoformat(), end.isoformat(), job_spec_json=spec_json
                 )
                 total_jobs += 1
                 cur = end + timedelta(days=1)
@@ -147,4 +159,5 @@ def enqueue_historical_backfill(
         "ok": True,
         "jobs_enqueued": total_jobs,
         "plants_touched": touched,
+        "modules_filter": modules,
     }

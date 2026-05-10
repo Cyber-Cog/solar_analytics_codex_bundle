@@ -12,7 +12,7 @@ import logging
 import os
 import time
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Optional, Set, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -27,7 +27,60 @@ from module_snapshots import (
 )
 from snap_perf import Timer
 
+from precompute_catalog import modules_for_worker, parse_job_spec_json
+
 log = logging.getLogger(__name__)
+
+_SNAPSHOT_MODULES: Set[str] = {"ds_summary", "ds_status", "unified", "loss_bridge"}
+_FAULT_TAB_MODULES: Set[str] = {"pl", "is", "gb", "comm", "cd"}
+
+
+def _warm_fault_tab_engines(plant_id: str, date_from: str, date_to: str, kinds: Set[str]) -> None:
+    """Run selected fault-tab engines with one DB session per task (thread pool)."""
+    if not kinds:
+        return
+    from concurrent.futures import ThreadPoolExecutor
+
+    from database import SessionLocal
+    from routers.faults import (
+        _cd_tab_with_cache,
+        _comm_tab_with_cache,
+        _gb_tab_with_cache,
+        _is_tab_with_cache,
+        _pl_page_with_cache,
+    )
+
+    runners = {
+        "pl": _pl_page_with_cache,
+        "is": _is_tab_with_cache,
+        "gb": _gb_tab_with_cache,
+        "comm": _comm_tab_with_cache,
+        "cd": _cd_tab_with_cache,
+    }
+
+    def _run_one(kind: str):
+        fn = runners.get(kind)
+        if fn is None:
+            return
+        s = SessionLocal()
+        try:
+            fn(s, plant_id, date_from, date_to)
+        finally:
+            s.close()
+
+    kinds_list = [k for k in kinds if k in runners]
+    if not kinds_list:
+        return
+    max_workers = min(5, len(kinds_list))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futs = [pool.submit(_run_one, k) for k in kinds_list]
+        for fut in futs:
+            fut.result()
+
+
+def _module_set_from_job_spec(job_spec_json: Optional[str]) -> Optional[FrozenSet[str]]:
+    """None = run all modules (backward compatible)."""
+    return modules_for_worker(parse_job_spec_json(job_spec_json))
 
 
 def resolve_recompute_day_range(
@@ -74,53 +127,83 @@ def compute_snapshots_for_range(
     date_from: str,
     date_to: str,
     user: User,
+    *,
+    job_spec_json: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Recompute and UPSERT snapshots for one plant + inclusive date range.
-    Returns simple metrics for logging/monitoring.
+
+    ``job_spec_json`` optional: JSON ``{"modules": ["unified", "is", ...]}``.
+    Omit, null, or full module list = run the entire pipeline (default).
     """
     from routers.faults import build_ds_scb_status_payload, build_ds_summary_dict, _unified_feed_rows_and_categories
     from routers.loss_analysis import build_loss_bridge_payload
+
+    mod = _module_set_from_job_spec(job_spec_json)
+    ran: list[str] = []
+
+    def _want(mid: str) -> bool:
+        return mod is None or mid in mod
 
     t0 = time.perf_counter()
     st = validate_or_refresh_raw_data_stats(db, plant_id)
     rows_hint = int(st.total_rows or 0) if st else 0
 
-    with Timer("ds_summary_snapshot", f"plant={plant_id}"):
-        ds_payload = build_ds_summary_dict(db, plant_id, date_from, date_to)
-        save_ds_summary_snapshot(db, plant_id, date_from, date_to, ds_payload)
+    if _want("ds_summary"):
+        with Timer("ds_summary_snapshot", f"plant={plant_id}"):
+            ds_payload = build_ds_summary_dict(db, plant_id, date_from, date_to)
+            save_ds_summary_snapshot(db, plant_id, date_from, date_to, ds_payload)
+        ran.append("ds_summary")
 
-    with Timer("ds_status_snapshot", f"plant={plant_id}"):
-        ds_status_payload = build_ds_scb_status_payload(db, plant_id, date_from, date_to)
-        save_ds_status_snapshot(db, plant_id, date_from, date_to, ds_status_payload)
+    if _want("ds_status"):
+        with Timer("ds_status_snapshot", f"plant={plant_id}"):
+            ds_status_payload = build_ds_scb_status_payload(db, plant_id, date_from, date_to)
+            save_ds_status_snapshot(db, plant_id, date_from, date_to, ds_status_payload)
+        ran.append("ds_status")
 
-    with Timer("unified_fault_snapshot", f"plant={plant_id}"):
-        unified_payload = _unified_feed_rows_and_categories(db, plant_id, date_from, date_to, user)
-        save_unified_fault_snapshot(db, plant_id, date_from, date_to, unified_payload)
-        upsert_unified_feed_category_totals_from_payload(
-            db, plant_id, date_from, date_to, unified_payload
-        )
+    if _want("unified"):
+        with Timer("unified_fault_snapshot", f"plant={plant_id}"):
+            unified_payload = _unified_feed_rows_and_categories(db, plant_id, date_from, date_to, user)
+            save_unified_fault_snapshot(db, plant_id, date_from, date_to, unified_payload)
+            upsert_unified_feed_category_totals_from_payload(
+                db, plant_id, date_from, date_to, unified_payload
+            )
+        ran.append("unified")
 
-    with Timer("loss_bridge_snapshot", f"plant={plant_id}"):
-        loss_payload = build_loss_bridge_payload(
-            db, plant_id, date_from, date_to, "plant", None, user
-        )
-        if isinstance(loss_payload, dict) and not loss_payload.get("error"):
-            save_loss_analysis_snapshot(db, plant_id, date_from, date_to, "plant", "", loss_payload)
+    if _want("loss_bridge"):
+        with Timer("loss_bridge_snapshot", f"plant={plant_id}"):
+            loss_payload = build_loss_bridge_payload(
+                db, plant_id, date_from, date_to, "plant", None, user
+            )
+            if isinstance(loss_payload, dict) and not loss_payload.get("error"):
+                save_loss_analysis_snapshot(db, plant_id, date_from, date_to, "plant", "", loss_payload)
+        ran.append("loss_bridge")
+
+    fault_kinds = {k for k in _FAULT_TAB_MODULES if _want(k)}
+    if fault_kinds:
+        with Timer("fault_tab_engines", f"plant={plant_id}"):
+            _warm_fault_tab_engines(plant_id, date_from, date_to, fault_kinds)
+        ran.extend(sorted(fault_kinds))
 
     every = int(os.environ.get("SNAPSHOT_RETENTION_EVERY_N_JOBS", "1"))
     if every > 0 and (hash(plant_id) % max(every, 1)) == 0:
-        try:
-            deleted = apply_snapshot_retention(db, plant_id=None)
-            if deleted:
-                log.info("snapshot_retention_deleted_rows=%s", deleted)
-        except Exception:
-            log.exception("snapshot_retention_failed")
+        if mod is None or (mod & _SNAPSHOT_MODULES):
+            try:
+                deleted = apply_snapshot_retention(db, plant_id=None)
+                if deleted:
+                    log.info("snapshot_retention_deleted_rows=%s", deleted)
+            except Exception:
+                log.exception("snapshot_retention_failed")
 
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     log.info(
-        "module_precompute_done plant=%s range=%s..%s total_ms=%.1f raw_rows_hint=%s",
-        plant_id, date_from, date_to, elapsed_ms, rows_hint,
+        "module_precompute_done plant=%s range=%s..%s modules=%s total_ms=%.1f raw_rows_hint=%s",
+        plant_id,
+        date_from,
+        date_to,
+        "all" if mod is None else sorted(mod),
+        elapsed_ms,
+        rows_hint,
     )
     return {
         "plant_id": plant_id,
@@ -128,6 +211,7 @@ def compute_snapshots_for_range(
         "date_to": date_to,
         "total_ms": round(elapsed_ms, 1),
         "raw_rows_hint": rows_hint,
+        "modules_ran": ran,
     }
 
 

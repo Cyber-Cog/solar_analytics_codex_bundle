@@ -58,8 +58,8 @@ from snap_perf import record_compute_ms, record_snapshot
 router = APIRouter(prefix="/api/faults", tags=["Faults"])
 
 # Bump when DS summary JSON semantics change so DB snapshots are recomputed even if still "fresh" vs raw_data_stats.
-DS_SUMMARY_PAYLOAD_VERSION = 4
-UNIFIED_FAULT_PAYLOAD_VERSION = 3
+DS_SUMMARY_PAYLOAD_VERSION = 5
+UNIFIED_FAULT_PAYLOAD_VERSION = 4
 GB_TAB_PAYLOAD_VERSION = 2
 DS_MIN_CONFIRMED_POINTS = int(os.getenv("DS_MIN_CONFIRMED_POINTS", "3"))
 
@@ -547,9 +547,9 @@ def _active_disconnected_strings_in_range(session: Session, plant_id: str, date_
     that passed `run_ds_detection` preprocessing (architecture, spare exclusion, leakage /
     operating / outlier / constant filters, etc.) and received a diagnostic row. A single
     blip or two isolated confirmed rows should not become an active DS fault, so this
-    requires at least `DS_MIN_CONFIRMED_POINTS` confirmed samples and no in-range NORMAL
-    rows for that SCB. `MAX(missing_strings) > 0` keeps only cases with a real disconnect
-    count at some point in the window (min_ms is still the usual window-min for display).
+    requires at least `DS_MIN_CONFIRMED_POINTS` samples that are both `CONFIRMED_DS` and
+    have `missing_strings > 0`. Interleaved `NORMAL` rows (recovery, noise, or sampling)
+    no longer hide a real disconnect: we only count confirmed, positive-missing rows.
 
     Row shape: scb_id -> {"min_ms": int, "first_ts": str, "last_ts": str}
     """
@@ -558,20 +558,36 @@ def _active_disconnected_strings_in_range(session: Session, plant_id: str, date_
     sql = text("""
         SELECT scb_id,
                MIN(CASE
-                   WHEN CAST(COALESCE(missing_strings, 0) AS INTEGER) > 2000 THEN 2000
-                   ELSE CAST(COALESCE(missing_strings, 0) AS INTEGER)
+                   WHEN fault_status = 'CONFIRMED_DS'
+                        AND CAST(COALESCE(missing_strings, 0) AS INTEGER) > 0
+                        AND CAST(COALESCE(missing_strings, 0) AS INTEGER) > 2000
+                   THEN 2000
+                   WHEN fault_status = 'CONFIRMED_DS'
+                        AND CAST(COALESCE(missing_strings, 0) AS INTEGER) > 0
+                   THEN CAST(COALESCE(missing_strings, 0) AS INTEGER)
+                   ELSE NULL
                END) AS min_ms,
-               MIN(timestamp) AS first_ts,
-               MAX(timestamp) AS last_ts
+               MIN(CASE
+                   WHEN fault_status = 'CONFIRMED_DS'
+                        AND CAST(COALESCE(missing_strings, 0) AS INTEGER) > 0
+                   THEN timestamp
+                   ELSE NULL
+               END) AS first_ts,
+               MAX(CASE
+                   WHEN fault_status = 'CONFIRMED_DS'
+                        AND CAST(COALESCE(missing_strings, 0) AS INTEGER) > 0
+                   THEN timestamp
+                   ELSE NULL
+               END) AS last_ts
         FROM fault_diagnostics
         WHERE plant_id = :p
           AND timestamp >= :f
           AND timestamp <= :t
         GROUP BY scb_id
-        HAVING COUNT(*) > 0
-          AND SUM(CASE WHEN fault_status = 'CONFIRMED_DS' THEN 1 ELSE 0 END) = COUNT(*)
-          AND COUNT(*) >= :min_points
-          AND MAX(CAST(COALESCE(missing_strings, 0) AS INTEGER)) > 0
+        HAVING SUM(CASE
+                   WHEN fault_status = 'CONFIRMED_DS'
+                        AND CAST(COALESCE(missing_strings, 0) AS INTEGER) > 0
+                   THEN 1 ELSE 0 END) >= :min_points
     """)
     try:
         rows = session.execute(sql, {"p": plant_id, "f": f_ts, "t": t_ts, "min_points": DS_MIN_CONFIRMED_POINTS}).fetchall()

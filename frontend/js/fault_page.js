@@ -435,10 +435,10 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
 
   // Computed locally from architecture — does not depend on API cache
   const totalScbs = useMemo(() => archList.filter(a => !a.spare_flag).length, [archList]);
-  const communicatingScbs = useMemo(() => {
-    const spareSet = new Set(archList.filter(a => a.spare_flag).map(a => a.scb_id));
-    return new Set(scbStatus.filter(s => !spareSet.has(s.scb_id)).map(s => s.scb_id)).size;
-  }, [archList, scbStatus]);
+  /** SCBs with current telemetry in range — use API `dsSummary.communicating_scbs` (not scbStatus row count). */
+  const communicatingScbsDisplay = (dsSummary && dsSummary.communicating_scbs != null)
+    ? dsSummary.communicating_scbs
+    : null;
   const constantBadScbSet = useMemo(() => new Set(filterSummary?.constant_scbs || []), [filterSummary]);
 
   const allScbs = useMemo(() => {
@@ -700,7 +700,16 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
       inverterId: inv.inverter_id || null,
     });
     else if (inv.kind === 'scb_perf') setSoilingModalScb(inv.scb_id);
-  }, []);
+    else if (inv.kind === 'clip') {
+      goFaultSub('clip');
+      if (inv.inverter_id) setSelectedCdInverter(inv.inverter_id);
+    } else if (inv.kind === 'derate') {
+      goFaultSub('derate');
+      if (inv.inverter_id) setSelectedCdInverter(inv.inverter_id);
+    } else if (inv.kind === 'inv_eff') {
+      goFaultSub('inv_eff');
+    }
+  }, [goFaultSub]);
 
   useEffect(() => { setUfPage(1); }, [plantId, dateFrom, dateTo, unifiedFeed, ufExcludeCats, ufEquipQ, ufLossMin, ufLossMax, ufTextQ]);
 
@@ -1881,7 +1890,13 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
         h('div', null,
           h('div', { className: 'kpi-grid', style: { gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' } },
             h(KpiCard, { label: 'Total SCBs', value: totalScbs || (dsSummary.total_scbs != null ? dsSummary.total_scbs : '—'), unit: '', color: 'var(--text-soft)' }),
-            h(KpiCard, { label: 'Communicating SCBs', value: communicatingScbs || (dsSummary.communicating_scbs != null ? dsSummary.communicating_scbs : '—'), unit: '', color: 'var(--accent)' }),
+            h(KpiCard, {
+              label: 'Communicating SCBs',
+              value: communicatingScbsDisplay != null ? communicatingScbsDisplay : '—',
+              unit: '',
+              color: 'var(--accent)',
+              caption: 'Distinct SCBs with string or SCB current telemetry in the selected range',
+            }),
             h(KpiCard, { label: 'Active DS Faults', value: dsSummary.active_ds_faults, unit: 'SCBs', color: 'var(--solar-orange)' }),
             h(KpiCard, { label: 'Total Disconnected Strings', value: dsSummary.total_disconnected_strings, unit: 'strings', color: '#EF4444' }),
             h(KpiCard, {

@@ -61,16 +61,17 @@ _MEM_PL_PAGE = "faults_pl_page_v2"
 _MEM_IS_TAB = "faults_is_tab_v4"
 _MEM_GB_TAB = "faults_gb_tab_v2"
 _MEM_COMM_TAB = "faults_comm_tab_v2"
-_MEM_INV_EFF_AGG = "faults_inv_eff_agg_v2"
+_MEM_INV_EFF_AGG = "faults_inv_eff_agg_v3"
 _MEM_CD_TAB = "faults_cd_tab_v3_fast"
 _MEM_RUNTIME_TABS_BUNDLE = "faults_runtime_tabs_bundle_v8"
 
-def _compute_inv_eff_aggregate(db: Session, plant_id: str, _from: str, _to: str) -> Tuple[float, int, List[str]]:
-    """Lightweight SQL-side aggregation of inverter DC→AC conversion loss for unified-feed tiles.
+def _compute_inv_eff_aggregate(
+    db: Session, plant_id: str, _from: str, _to: str
+) -> Tuple[float, int, List[str], dict]:
+    """SQL-side Σ (dc_kw − ac_kw)·dt per inverter + last timestamp with loss context.
 
-    Mirrors the core formula of `get_inverter_efficiency_analysis` (Σ (dc_kw − ac_kw) × dt_h)
-    but in a single window-function query so the overview tile matches the tab value without
-    re-reading ~1M rows into Python. Returns (total_loss_mwh, inverters_with_active_loss, inv_ids).
+    Returns (total_loss_mwh, active_count, inv_ids_with_loss, per_inv_detail).
+    per_inv_detail: equipment_id -> {"loss_kwh": float, "last_ts": str|None}
     """
     sql = text(
         """
@@ -84,6 +85,11 @@ def _compute_inv_eff_aggregate(db: Session, plant_id: str, _from: str, _to: str)
              AND timestamp BETWEEN :f AND :t
            GROUP BY timestamp, equipment_id
         ),
+        last_ts AS (
+          SELECT equipment_id, MAX(timestamp) AS last_ts
+            FROM paired
+           GROUP BY equipment_id
+        ),
         stepped AS (
           SELECT equipment_id,
                  dc_kw, ac_kw,
@@ -92,8 +98,9 @@ def _compute_inv_eff_aggregate(db: Session, plant_id: str, _from: str, _to: str)
                  )) AS step
             FROM paired
            WHERE dc_kw IS NOT NULL AND ac_kw IS NOT NULL
-        )
-        SELECT equipment_id,
+        ),
+        loss_agg AS (
+          SELECT equipment_id,
                SUM(
                  CASE WHEN dc_kw > ac_kw THEN
                    (dc_kw - ac_kw) *
@@ -104,6 +111,12 @@ def _compute_inv_eff_aggregate(db: Session, plant_id: str, _from: str, _to: str)
                ) AS loss_kwh
           FROM stepped
          GROUP BY equipment_id
+        )
+        SELECT loss_agg.equipment_id,
+               loss_agg.loss_kwh,
+               last_ts.last_ts
+          FROM loss_agg
+          LEFT JOIN last_ts ON last_ts.equipment_id = loss_agg.equipment_id
         """
     )
     try:
@@ -112,26 +125,46 @@ def _compute_inv_eff_aggregate(db: Session, plant_id: str, _from: str, _to: str)
             {"p": plant_id, "f": f"{_from} 00:00:00", "t": f"{_to} 23:59:59"},
         ).fetchall()
     except Exception:
-        return 0.0, 0, []
-    total_mwh = sum(float(r.loss_kwh or 0) for r in rows) / 1000.0
-    active = sum(1 for r in rows if (r.loss_kwh or 0) > 1.0)
-    inv_ids = [str(r.equipment_id) for r in rows if r.equipment_id and (r.loss_kwh or 0) > 1.0]
-    return round(total_mwh, 4), active, inv_ids
+        return 0.0, 0, [], {}
+    per_inv: dict = {}
+    for r in rows:
+        eid = str(r[0]) if r[0] else ""
+        if not eid:
+            continue
+        lk = float(r[1] or 0)
+        raw_ts = r[2]
+        ts_s = None
+        if raw_ts is not None:
+            ts_s = str(raw_ts).replace("T", " ")[:19]
+        per_inv[eid] = {"loss_kwh": lk, "last_ts": ts_s}
+    total_mwh = sum(float(d["loss_kwh"]) for d in per_inv.values()) / 1000.0
+    active = sum(1 for d in per_inv.values() if d["loss_kwh"] > 1.0)
+    inv_ids = [eid for eid, d in per_inv.items() if d["loss_kwh"] > 1.0]
+    return round(total_mwh, 4), active, inv_ids, per_inv
 
 
-def _inv_eff_aggregate_with_cache(db: Session, plant_id: str, _from: str, _to: str) -> Tuple[float, int, List[str]]:
+def _inv_eff_aggregate_with_cache(db: Session, plant_id: str, _from: str, _to: str) -> Tuple[float, int, List[str], dict]:
     hit = _dc_get(_MEM_INV_EFF_AGG, plant_id, _from, _to)
     if hit is not None:
         try:
             ids = hit.get("inv_ids")
             if not isinstance(ids, list):
                 ids = []
-            return float(hit.get("loss_mwh") or 0), int(hit.get("active") or 0), [str(x) for x in ids]
+            per = hit.get("per_inv")
+            if not isinstance(per, dict):
+                per = {}
+            return float(hit.get("loss_mwh") or 0), int(hit.get("active") or 0), [str(x) for x in ids], per
         except Exception:
             pass
-    total_mwh, active, inv_ids = _compute_inv_eff_aggregate(db, plant_id, _from, _to)
-    _dc_set(_MEM_INV_EFF_AGG, plant_id, _from, _to, {"loss_mwh": total_mwh, "active": active, "inv_ids": inv_ids})
-    return total_mwh, active, inv_ids
+    total_mwh, active, inv_ids, per_inv = _compute_inv_eff_aggregate(db, plant_id, _from, _to)
+    _dc_set(
+        _MEM_INV_EFF_AGG,
+        plant_id,
+        _from,
+        _to,
+        {"loss_mwh": total_mwh, "active": active, "inv_ids": inv_ids, "per_inv": per_inv},
+    )
+    return total_mwh, active, inv_ids, per_inv
 
 
 def _fault_date_range(date_from: Optional[str], date_to: Optional[str]) -> Tuple[str, str]:
@@ -153,9 +186,12 @@ def _range_end_date_iso(date_to: Optional[str]) -> Optional[str]:
 def _fault_is_active(last_seen: Optional[str], date_to: Optional[str]) -> bool:
     """True when last_seen calendar day equals selected range end (fault still open at end of range)."""
     end = _range_end_date_iso(date_to)
-    if not end or not last_seen:
+    if not end or last_seen is None:
         return False
-    ls = str(last_seen).replace("T", " ")[:10]
+    s = str(last_seen).strip()
+    if not s:
+        return False
+    ls = s.replace("T", " ")[:10]
     return ls == end
 
 
@@ -346,6 +382,99 @@ def _fault_timeline_query(session: Session, plant_id: str, scb_id: Optional[str]
     if date_to:
         query = query.filter(FaultDiagnostics.timestamp <= f"{date_to} 23:59:59")
     return query
+
+
+def _count_scbs_with_current_telemetry_in_range(
+    db: Session, plant_id: str, date_from: Optional[str], date_to: Optional[str]
+) -> Optional[int]:
+    """Distinct non-spare SCBs that had string- or SCB-level current telemetry in the window.
+
+    This measures **ingestion / communication**, not rows in `fault_diagnostics` (which only
+    exists for SCBs processed by the DS engine and wrongly capped the old KPI at ~active DS).
+    """
+    if not date_from or not date_to:
+        return None
+    f_ts = f"{str(date_from)[:10]} 00:00:00"
+    t_ts = f"{str(date_to)[:10]} 23:59:59"
+    try:
+        n = db.execute(
+            text(
+                """
+                SELECT COUNT(DISTINCT u.scb_id)::int
+                  FROM (
+                        SELECT pa.scb_id
+                          FROM raw_data_generic r
+                          JOIN plant_architecture pa
+                            ON pa.plant_id = r.plant_id
+                           AND pa.string_id = r.equipment_id
+                         WHERE r.plant_id = :p
+                           AND r.timestamp >= :f
+                           AND r.timestamp <= :t
+                           AND LOWER(TRIM(r.equipment_level::text)) = 'string'
+                           AND LOWER(TRIM(r.signal::text)) = 'string_current'
+                           AND pa.scb_id IS NOT NULL
+                           AND COALESCE(pa.spare_flag, false) = false
+                        UNION
+                        SELECT pa.scb_id
+                          FROM raw_data_generic r
+                          JOIN plant_architecture pa
+                            ON pa.plant_id = r.plant_id
+                           AND pa.scb_id = r.equipment_id
+                         WHERE r.plant_id = :p
+                           AND r.timestamp >= :f
+                           AND r.timestamp <= :t
+                           AND LOWER(TRIM(r.equipment_level::text)) = 'scb'
+                           AND LOWER(TRIM(r.signal::text)) IN (
+                                 'string_current',
+                                 'per_string_current',
+                                 'virtual_string_current',
+                                 'dc_current'
+                               )
+                           AND pa.scb_id IS NOT NULL
+                           AND COALESCE(pa.spare_flag, false) = false
+                        UNION
+                        SELECT pa.scb_id
+                          FROM dc_hierarchy_derived r
+                          JOIN plant_architecture pa
+                            ON pa.plant_id = r.plant_id
+                           AND pa.string_id = r.equipment_id
+                         WHERE r.plant_id = :p
+                           AND r.timestamp >= :f
+                           AND r.timestamp <= :t
+                           AND LOWER(TRIM(r.equipment_level::text)) = 'string'
+                           AND LOWER(TRIM(r.signal::text)) = 'string_current'
+                           AND pa.scb_id IS NOT NULL
+                           AND COALESCE(pa.spare_flag, false) = false
+                        UNION
+                        SELECT pa.scb_id
+                          FROM dc_hierarchy_derived r
+                          JOIN plant_architecture pa
+                            ON pa.plant_id = r.plant_id
+                           AND pa.scb_id = r.equipment_id
+                         WHERE r.plant_id = :p
+                           AND r.timestamp >= :f
+                           AND r.timestamp <= :t
+                           AND LOWER(TRIM(r.equipment_level::text)) = 'scb'
+                           AND LOWER(TRIM(r.signal::text)) IN (
+                                 'string_current',
+                                 'per_string_current',
+                                 'virtual_string_current',
+                                 'dc_current'
+                               )
+                           AND pa.scb_id IS NOT NULL
+                           AND COALESCE(pa.spare_flag, false) = false
+                       ) u
+                """
+            ),
+            {"p": plant_id, "f": f_ts, "t": t_ts},
+        ).scalar()
+        return int(n or 0)
+    except OperationalError as exc:
+        _log.warning("telemetry SCB count skipped (timeout/index): %s", exc)
+        return None
+    except Exception:
+        _log.exception("telemetry SCB count failed plant=%s", plant_id)
+        return None
 
 
 def _get_arch_spare_and_total(db: Session, plant_id: str):
@@ -582,19 +711,21 @@ def build_ds_summary_dict(
     t_ts = f"{date_to} 23:59:59" if date_to else None
     communicating_scbs = 0
     if f_ts and t_ts:
-        try:
-            comm_q = db.query(FaultDiagnostics.scb_id).filter(
-                FaultDiagnostics.plant_id == plant_id,
-                FaultDiagnostics.timestamp >= f_ts,
-                FaultDiagnostics.timestamp <= t_ts,
-            ).distinct()
-            comm_ids = {r[0] for r in comm_q.all()}
-            communicating_scbs = len(comm_ids - spare_scbs)
-        except OperationalError as exc:
-            # Large fault_diagnostics without a matching (plant_id, timestamp) index can
-            # hit statement_timeout; keep the rest of the summary working.
-            _log.warning("communicating_scbs query skipped: %s", exc)
-            communicating_scbs = 0
+        tel_n = _count_scbs_with_current_telemetry_in_range(db, plant_id, date_from, date_to)
+        if tel_n is not None:
+            communicating_scbs = min(int(tel_n), int(total_scbs or 0))
+        else:
+            try:
+                comm_q = db.query(FaultDiagnostics.scb_id).filter(
+                    FaultDiagnostics.plant_id == plant_id,
+                    FaultDiagnostics.timestamp >= f_ts,
+                    FaultDiagnostics.timestamp <= t_ts,
+                ).distinct()
+                comm_ids = {r[0] for r in comm_q.all()}
+                communicating_scbs = len(comm_ids - spare_scbs)
+            except OperationalError as exc:
+                _log.warning("communicating_scbs fallback (fault_diagnostics) skipped: %s", exc)
+                communicating_scbs = 0
 
     # Min(missing_strings) over range; exclude filter-summary SCBs so card matches table.
     range_min_map = _active_disconnected_strings_in_range(db, plant_id, date_from, date_to)
@@ -821,9 +952,13 @@ def build_ds_scb_status_payload(
         final_min = int(info.get("min_ms") or 0)
         row_dict["missing_strings"] = final_min
         row_dict["range_min_missing_strings"] = final_min
-        row_dict["last_seen"] = str(info.get("last_ts") or row_dict.get("timestamp") or "")[:19]
+        last_raw = info.get("last_ts") or row_dict.get("timestamp")
+        if last_raw is not None and str(last_raw).strip():
+            row_dict["last_seen"] = str(last_raw).replace("T", " ")[:19]
+        else:
+            row_dict["last_seen"] = None
         fst = str(info.get("first_ts") or "").strip()
-        row_dict["active_since"] = fst[:19] if fst else None
+        row_dict["active_since"] = fst.replace("T", " ")[:19] if fst else None
         row_dict["is_fault_active"] = _fault_is_active(row_dict.get("last_seen"), date_to)
         if final_min > 0:
             row_day = str(row_dict["timestamp"])[:10]
@@ -1219,16 +1354,48 @@ def get_runtime_tabs_bundle(
 
 
 def _fault_inverter_dc_energy_kwh_map(db: Session, plant_id: str, _from: str, _to: str) -> dict:
+    """Integrated dc_power → kWh per inverter. Tries `choose_data_table` then raw_data_generic."""
     f_ts = f"{_from[:10]} 00:00:00"
     t_ts = f"{_to[:10]} 23:59:59"
-    table = choose_data_table(db, plant_id, _from[:10], _to[:10])
+    primary = choose_data_table(db, plant_id, _from[:10], _to[:10])
+    tables = [primary] + (["raw_data_generic"] if primary != "raw_data_generic" else [])
+    for table in tables:
+        try:
+            rows = db.execute(
+                text(sql_inverter_dc_energy_kwh(table)),
+                {"plant_id": plant_id, "f": f_ts, "t": t_ts},
+            ).fetchall()
+        except Exception:
+            _log.warning("dc_power energy map failed plant=%s table=%s", plant_id, table)
+            continue
+        out = {str(r[0]): float(r[1] or 0) for r in rows if r[0] is not None}
+        if out and sum(out.values()) > 1e-6:
+            return out
+    return {}
+
+
+def _ds_scb_confirmed_energy_sum_kwh(
+    db: Session, plant_id: str, date_from: str, date_to: str
+) -> dict:
+    """Per-SCB sum of energy_loss_kwh in [date_from, date_to] for CONFIRMED_DS rows."""
+    f_ts = f"{str(date_from)[:10]} 00:00:00"
+    t_ts = f"{str(date_to)[:10]} 23:59:59"
     try:
         rows = db.execute(
-            text(sql_inverter_dc_energy_kwh(table)),
-            {"plant_id": plant_id, "f": f_ts, "t": t_ts},
+            text(
+                """
+                SELECT scb_id, COALESCE(SUM(energy_loss_kwh), 0)::double precision AS ekwh
+                  FROM fault_diagnostics
+                 WHERE plant_id = :p
+                   AND timestamp >= :f AND timestamp <= :t
+                   AND fault_status = 'CONFIRMED_DS'
+                 GROUP BY scb_id
+                """
+            ),
+            {"p": plant_id, "f": f_ts, "t": t_ts},
         ).fetchall()
     except Exception:
-        _log.exception("dc_power energy map failed plant=%s", plant_id)
+        _log.exception("ds per-scb energy sum failed plant=%s", plant_id)
         return {}
     return {str(r[0]): float(r[1] or 0) for r in rows if r[0] is not None}
 
@@ -1490,7 +1657,9 @@ def _unified_fault_categories_core(
 
     # Inverter DC→AC conversion loss — keeps the overview tile in sync with the
     # Inverter Efficiency sub-tab value (previously hard-coded to 0).
-    inv_eff_loss_mwh, inv_eff_active, inv_eff_inv_ids = _inv_eff_aggregate_with_cache(db, plant_id, _from, _to)
+    inv_eff_loss_mwh, inv_eff_active, inv_eff_inv_ids, inv_eff_per_inv = _inv_eff_aggregate_with_cache(
+        db, plant_id, _from, _to
+    )
 
     categories = [
         {
@@ -1605,6 +1774,7 @@ def _unified_fault_categories_core(
         "comm_tab": comm_tab,
         "cd_tab": cd_tab,
         "soiling_rank_rows": sol_rows_raw,
+        "inv_eff_per_inv": inv_eff_per_inv,
     }
 
 
@@ -1648,9 +1818,12 @@ def _unified_feed_rows_and_categories(
     is_tab = core["is_tab"]
     gb_tab = core["gb_tab"]
     comm_tab = core["comm_tab"]
+    cd_tab = core["cd_tab"]
     sol_rows_raw = core["soiling_rank_rows"]
+    inv_eff_per_inv = core.get("inv_eff_per_inv") or {}
 
     ds_pack = get_ds_scb_status(plant_id=plant_id, date_from=_from, date_to=_to, db=db, current_user=current_user)
+    ds_energy_by_scb = _ds_scb_confirmed_energy_sum_kwh(db, plant_id, _from, _to)
 
     rows: List[dict] = []
 
@@ -1659,17 +1832,21 @@ def _unified_feed_rows_and_categories(
         scb = drow.get("scb_id")
         if not scb:
             continue
-        ekwh = float(drow.get("energy_loss_kwh") or 0)
+        scb_s = str(scb)
+        ekwh = float(ds_energy_by_scb.get(scb_s) or drow.get("energy_loss_kwh") or 0)
         ts = drow.get("timestamp")
-        ls_ds = drow.get("last_seen") or ts
+        ls_raw = drow.get("last_seen") or ts
+        ls_ds = str(ls_raw).replace("T", " ")[:19] if ls_raw else None
         as_ds = drow.get("active_since")
+        if as_ds:
+            as_ds = str(as_ds).replace("T", " ")[:19]
         rows.append(
             {
-                "id": f"ds:{scb}",
+                "id": f"ds:{scb_s}",
                 "category": "ds",
                 "category_label": "Disconnected Strings",
-                "occurred_at": str(ts) if ts else f"{_to} 00:00:00",
-                "equipment_id": scb,
+                "occurred_at": str(ts) if ts else f"{str(_to)[:10]} 00:00:00",
+                "equipment_id": scb_s,
                 "equipment_level": "scb",
                 "severity_energy_kwh": round(ekwh, 4),
                 "severity_hours": None,
@@ -1677,8 +1854,8 @@ def _unified_feed_rows_and_categories(
                 "status": str(drow.get("fault_status") or "DS"),
                 "active_since": as_ds,
                 "last_seen": ls_ds,
-                "is_fault_active": bool(drow.get("is_fault_active")),
-                "investigate": {"kind": "ds", "scb_id": scb},
+                "is_fault_active": _fault_is_active(ls_ds, _to),
+                "investigate": {"kind": "ds", "scb_id": scb_s},
                 "_sort_loss_kwh": ekwh,
             }
         )
@@ -1690,14 +1867,16 @@ def _unified_feed_rows_and_categories(
         ekwh = float(prow.get("total_energy_loss_kwh") or 0)
         if ekwh <= 0:
             continue
-        ls_pl = prow.get("last_seen_fault") or prow.get("investigation_window_end")
-        as_pl = prow.get("investigation_window_start")
+        ls_raw_pl = prow.get("last_seen_fault") or prow.get("investigation_window_end")
+        as_raw_pl = prow.get("investigation_window_start")
+        ls_pl = str(ls_raw_pl).replace("T", " ")[:19] if ls_raw_pl else None
+        as_pl = str(as_raw_pl).replace("T", " ")[:19] if as_raw_pl else None
         rows.append(
             {
                 "id": f"pl:{inv}",
                 "category": "pl",
                 "category_label": "Power Limitation",
-                "occurred_at": str(ls_pl or f"{_to} 23:59:59"),
+                "occurred_at": str(ls_raw_pl or f"{str(_to)[:10]} 23:59:59"),
                 "equipment_id": inv,
                 "equipment_level": "inverter",
                 "severity_energy_kwh": round(ekwh, 4),
@@ -1721,14 +1900,16 @@ def _unified_feed_rows_and_categories(
         ekwh_is = float(irow.get("total_shutdown_energy_loss_kwh") or 0)
         if pts <= 0 and hrs <= 0 and ekwh_is <= 0:
             continue
-        ls_is = irow.get("last_seen_shutdown") or irow.get("investigation_window_end")
-        as_is = irow.get("active_since_shutdown") or irow.get("investigation_window_start")
+        ls_raw_is = irow.get("last_seen_shutdown") or irow.get("investigation_window_end")
+        as_raw_is = irow.get("active_since_shutdown") or irow.get("investigation_window_start")
+        ls_is = str(ls_raw_is).replace("T", " ")[:19] if ls_raw_is else None
+        as_is = str(as_raw_is).replace("T", " ")[:19] if as_raw_is else None
         rows.append(
             {
                 "id": f"is:{inv}",
                 "category": "is",
                 "category_label": "Inverter Shutdown",
-                "occurred_at": str(ls_is or f"{_to} 23:59:59"),
+                "occurred_at": str(ls_raw_is or f"{str(_to)[:10]} 23:59:59"),
                 "equipment_id": inv,
                 "equipment_level": "inverter",
                 "severity_energy_kwh": round(ekwh_is, 4),
@@ -1751,14 +1932,16 @@ def _unified_feed_rows_and_categories(
         pts = int(erow.get("breakdown_points") or 0)
         if pts <= 0 and hrs <= 0:
             continue
-        ls_gb = erow.get("last_seen_breakdown") or erow.get("investigation_window_end")
-        as_gb = erow.get("investigation_window_start")
+        ls_raw_gb = erow.get("last_seen_breakdown") or erow.get("investigation_window_end")
+        as_raw_gb = erow.get("investigation_window_start")
+        ls_gb = str(ls_raw_gb).replace("T", " ")[:19] if ls_raw_gb else None
+        as_gb = str(as_raw_gb).replace("T", " ")[:19] if as_raw_gb else None
         rows.append(
             {
                 "id": f"gb:{eid}",
                 "category": "gb",
                 "category_label": "Grid Breakdown",
-                "occurred_at": str(ls_gb or f"{_to} 23:59:59"),
+                "occurred_at": str(ls_raw_gb or f"{str(_to)[:10]} 23:59:59"),
                 "equipment_id": str(eid),
                 "equipment_level": "plant_event",
                 "severity_energy_kwh": 0.0,
@@ -1791,14 +1974,16 @@ def _unified_feed_rows_and_categories(
             inv_payload["inverter_id"] = str(inv)
         if issue_kind:
             inv_payload["issue_kind"] = issue_kind
-        ls_c = crow.get("last_seen_communication") or crow.get("investigation_window_end")
-        as_c = crow.get("investigation_window_start")
+        ls_raw_c = crow.get("last_seen_communication") or crow.get("investigation_window_end")
+        as_raw_c = crow.get("investigation_window_start")
+        ls_c = str(ls_raw_c).replace("T", " ")[:19] if ls_raw_c else None
+        as_c = str(as_raw_c).replace("T", " ")[:19] if as_raw_c else None
         rows.append(
             {
                 "id": f"comm:{eq_level}:{eq_id}:{issue_kind or 'event'}",
                 "category": "comm",
                 "category_label": "Communication Issue",
-                "occurred_at": str(ls_c or f"{_to} 23:59:59"),
+                "occurred_at": str(ls_raw_c or f"{str(_to)[:10]} 23:59:59"),
                 "equipment_id": str(eq_id),
                 "equipment_level": str(eq_level),
                 "severity_energy_kwh": round(ekwh, 4),
@@ -1810,6 +1995,86 @@ def _unified_feed_rows_and_categories(
                 "is_fault_active": _fault_is_active(ls_c, _to),
                 "investigate": inv_payload,
                 "_sort_loss_kwh": ekwh if ekwh > 0 else hrs * 25.0,
+            }
+        )
+
+    for cdrow in cd_tab.get("inverter_status") or []:
+        inv = cdrow.get("inverter_id")
+        if not inv:
+            continue
+        inv_s = str(inv)
+        lc = float(cdrow.get("loss_power_clipping_kwh") or 0)
+        ld = float(cdrow.get("loss_static_derating_kwh") or 0) + float(cdrow.get("loss_dynamic_derating_kwh") or 0)
+        ls_raw = cdrow.get("last_seen_fault") or cdrow.get("investigation_window_end")
+        as_raw = cdrow.get("investigation_window_start")
+        ls_s = str(ls_raw).replace("T", " ")[:19] if ls_raw else None
+        as_s = str(as_raw).replace("T", " ")[:19] if as_raw else None
+        if lc > 1e-6:
+            rows.append(
+                {
+                    "id": f"clip:{inv_s}",
+                    "category": "clip",
+                    "category_label": "Clipping",
+                    "occurred_at": str(ls_raw or f"{str(_to)[:10]} 23:59:59"),
+                    "equipment_id": inv_s,
+                    "equipment_level": "inverter",
+                    "severity_energy_kwh": round(lc, 4),
+                    "severity_hours": None,
+                    "duration_note": f"{int(cdrow.get('power_clip_points') or 0)} clip points",
+                    "status": "Power clipping",
+                    "active_since": as_s,
+                    "last_seen": ls_s,
+                    "is_fault_active": _fault_is_active(ls_s, _to),
+                    "investigate": {"kind": "clip", "inverter_id": inv_s},
+                    "_sort_loss_kwh": lc,
+                }
+            )
+        if ld > 1e-6:
+            rows.append(
+                {
+                    "id": f"derate:{inv_s}",
+                    "category": "derate",
+                    "category_label": "Derating",
+                    "occurred_at": str(ls_raw or f"{str(_to)[:10]} 23:59:59"),
+                    "equipment_id": inv_s,
+                    "equipment_level": "inverter",
+                    "severity_energy_kwh": round(ld, 4),
+                    "severity_hours": None,
+                    "duration_note": f"{int(cdrow.get('static_derate_points') or 0)} static / {int(cdrow.get('dynamic_derate_points') or 0)} dynamic pts",
+                    "status": "Derating",
+                    "active_since": as_s,
+                    "last_seen": ls_s,
+                    "is_fault_active": _fault_is_active(ls_s, _to),
+                    "investigate": {"kind": "derate", "inverter_id": inv_s},
+                    "_sort_loss_kwh": ld,
+                }
+            )
+
+    for inv_id, meta in (inv_eff_per_inv or {}).items():
+        if not inv_id:
+            continue
+        lk = float((meta or {}).get("loss_kwh") or 0)
+        if lk <= 1.0:
+            continue
+        ts_meta = (meta or {}).get("last_ts")
+        ls_ie = str(ts_meta).replace("T", " ")[:19] if ts_meta else None
+        rows.append(
+            {
+                "id": f"inv_eff:{inv_id}",
+                "category": "inv_eff",
+                "category_label": "Inverter Efficiency",
+                "occurred_at": str(ls_ie or f"{str(_to)[:10]} 23:59:59"),
+                "equipment_id": str(inv_id),
+                "equipment_level": "inverter",
+                "severity_energy_kwh": round(lk, 4),
+                "severity_hours": None,
+                "duration_note": "DC→AC conversion gap (range)",
+                "status": "Inverter efficiency",
+                "active_since": f"{str(_from)[:10]} 00:00:00",
+                "last_seen": ls_ie,
+                "is_fault_active": _fault_is_active(ls_ie, _to),
+                "investigate": {"kind": "inv_eff", "inverter_id": str(inv_id)},
+                "_sort_loss_kwh": lk,
             }
         )
 

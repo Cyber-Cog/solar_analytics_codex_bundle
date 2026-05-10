@@ -52,7 +52,7 @@ window.LucideIcon = ({ name, size = 16, strokeWidth = 2, className = '' }) => {
 // variant: 'default' | 'performance' (dashboard energy KPI typography) | 'weather' (slightly softer numbers)
 // subVariant: 'today-energy' | 'total-energy' | 'co2-avoided' | 'total-power' | 'current' | 'voltage'
 // Loading state: optional loading prop to show skeleton
-window.KpiCard = ({ icon, label, value, unit, color='var(--accent)', variant='default', subVariant, loading = false, onClick }) => {
+window.KpiCard = ({ icon, label, value, unit, caption, color='var(--accent)', variant='default', subVariant, loading = false, onClick }) => {
   const cls = ['kpi-card'];
   if (variant === 'performance') cls.push('kpi-card--performance');
   if (variant === 'weather') cls.push('kpi-card--weather');
@@ -101,6 +101,10 @@ window.KpiCard = ({ icon, label, value, unit, color='var(--accent)', variant='de
       ? h('div', { className:'kpi-value' }, animNode || (value ?? '—'))
       : h(window.SkeletonLoader, { width: '80%', height: '24px', count: 1 }),
     unit && !loading && h('div', { className:'kpi-unit' }, unit),
+    caption && !loading && h('div', {
+      className: 'kpi-caption',
+      style: { fontSize: 10, opacity: 0.82, marginTop: 6, lineHeight: 1.25, fontWeight: 500 },
+    }, caption),
     loading && h(window.SkeletonLoader, { width: '60%', height: '12px', count: 1 }),
   );
 };

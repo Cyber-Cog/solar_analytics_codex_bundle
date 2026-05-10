@@ -16,7 +16,7 @@
 (function () {
   'use strict';
 
-  var ASSET_BUILD_ID = 'phase5-vercel-cdn-20260423';
+  var ASSET_BUILD_ID = '2026-05-10-is-energy-loss-ui';
 
   function perfLog(label, t0) {
     try {

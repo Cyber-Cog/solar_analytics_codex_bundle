@@ -1160,7 +1160,13 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
       !isLoading && isSummary && h(Card, { title: 'Inverter Shutdown Insights (AC=0 and Irradiance>5 W/m²)' },
         h('div', { className: 'kpi-grid', style: { gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' } },
           h(KpiCard, { label: 'Affected Inverters', value: isSummary.active_shutdown_inverters ?? 0, unit: '', color: 'var(--solar-orange)' }),
-          h(KpiCard, { label: 'Total Shutdown Hours', value: (isSummary.total_shutdown_hours ?? 0).toFixed(2), unit: 'h', color: '#EF4444' })
+          h(KpiCard, { label: 'Total Shutdown Hours', value: (isSummary.total_shutdown_hours ?? 0).toFixed(2), unit: 'h', color: '#EF4444' }),
+          h(KpiCard, {
+            label: 'Total energy loss',
+            value: (isSummary.total_shutdown_energy_loss_kwh ?? 0).toFixed(1),
+            unit: 'kWh',
+            color: '#f59e0b',
+          })
         )
       ),
       !isLoading && h(Card, { title: `Inverter Shutdown Events (${isStatus.length} Inverters)` },
@@ -1169,6 +1175,7 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
             { key: 'inverter_id', label: 'Inverter', render: (row) => h('strong', null, row.inverter_id), csvValue: (row) => row.inverter_id },
             { key: 'shutdown_points', label: 'Shutdown Points', sortValue: (row) => row.shutdown_points ?? -Infinity, render: (row) => Number(row.shutdown_points || 0), csvValue: (row) => Number(row.shutdown_points || 0) },
             { key: 'shutdown_hours', label: 'Shutdown Hours', sortValue: (row) => row.shutdown_hours ?? -Infinity, render: (row) => Number(row.shutdown_hours || 0).toFixed(3), csvValue: (row) => Number(row.shutdown_hours || 0).toFixed(3) },
+            { key: 'total_shutdown_energy_loss_kwh', label: 'Energy loss (kWh)', sortValue: (row) => row.total_shutdown_energy_loss_kwh ?? -Infinity, render: (row) => Number(row.total_shutdown_energy_loss_kwh || 0).toFixed(2), csvValue: (row) => Number(row.total_shutdown_energy_loss_kwh || 0).toFixed(2) },
             { key: 'last_seen_shutdown', label: 'Last Seen', csvValue: (row) => row.last_seen_shutdown || '' },
             { key: 'investigation_window', label: 'Investigation Window', render: (row) => {
               const s = row.investigation_window_start || '';
@@ -1185,7 +1192,7 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
           emptyMessage: 'No inverter shutdown detected for the selected range.',
           filename: `inverter_shutdown_${plantId || 'plant'}_${dateFrom}_${dateTo}.csv`,
           maxHeight: 420,
-          initialSortKey: 'shutdown_hours',
+          initialSortKey: 'total_shutdown_energy_loss_kwh',
           initialSortDir: 'desc',
         })
       ),

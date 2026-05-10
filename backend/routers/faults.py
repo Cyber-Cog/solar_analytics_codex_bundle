@@ -57,6 +57,9 @@ from snap_perf import record_compute_ms, record_snapshot
 
 router = APIRouter(prefix="/api/faults", tags=["Faults"])
 
+# Bump when DS summary JSON semantics change so DB snapshots are recomputed even if still "fresh" vs raw_data_stats.
+DS_SUMMARY_PAYLOAD_VERSION = 2
+
 _MEM_PL_PAGE = "faults_pl_page_v2"
 _MEM_IS_TAB = "faults_is_tab_v4"
 _MEM_GB_TAB = "faults_gb_tab_v2"
@@ -704,6 +707,7 @@ def build_ds_summary_dict(
             "latest_date": date_to or "No Data",
             "total_scbs": total_scbs,
             "communicating_scbs": 0,
+            "payload_version": DS_SUMMARY_PAYLOAD_VERSION,
         }
 
     latest_date = latest_ts.split(" ")[0]
@@ -816,6 +820,7 @@ def build_ds_summary_dict(
         "energy_note": energy_note,
         "total_scbs": total_scbs,
         "communicating_scbs": communicating_scbs,
+        "payload_version": DS_SUMMARY_PAYLOAD_VERSION,
     }
 
 
@@ -839,17 +844,29 @@ def get_ds_summary(
         if got is None:
             raise HTTPException(503, detail=SNAPSHOT_READ_ONLY_HTTP_DETAIL)
         payload, fresh = got
-        if fresh:
+        ver_ok = int(payload.get("payload_version") or 0) >= DS_SUMMARY_PAYLOAD_VERSION
+        if fresh and ver_ok:
             record_snapshot("ds_summary", True)
             record_compute_ms("ds_summary_http", (time.perf_counter() - t0) * 1000.0, f"hit ro plant={plant_id}")
             return payload
+        if not ver_ok and not snapshot_allow_stale():
+            raise HTTPException(
+                503,
+                detail={
+                    "error": "ds_summary_snapshot_outdated",
+                    "message": (
+                        "Stored DS summary predates current metrics (payload_version). "
+                        "Run the precompute worker for this plant/range, or set SOLAR_SNAPSHOT_ALLOW_STALE=1 temporarily."
+                    ),
+                },
+            )
         if snapshot_allow_stale():
             record_snapshot("ds_summary", True)
             record_compute_ms("ds_summary_http", (time.perf_counter() - t0) * 1000.0, f"stale ro plant={plant_id}")
             return attach_snapshot_stale_meta(payload)
         raise HTTPException(503, detail=SNAPSHOT_STALE_HTTP_DETAIL)
     hit = get_ds_summary_snapshot(db, plant_id, key_from, key_to)
-    if hit is not None:
+    if hit is not None and int(hit.get("payload_version") or 0) >= DS_SUMMARY_PAYLOAD_VERSION:
         record_snapshot("ds_summary", True)
         record_compute_ms("ds_summary_http", (time.perf_counter() - t0) * 1000.0, f"hit plant={plant_id}")
         return hit

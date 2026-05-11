@@ -87,6 +87,8 @@ class StationDetails(BaseModel):
     technology: str
     status: str
     capacity_mwp: Optional[float]
+    plant_type: Optional[str] = None
+    capacity_badge: Optional[str] = None
     cod_date: Optional[str]
     ppa_tariff: Optional[float]
     plant_age_years: Optional[float]

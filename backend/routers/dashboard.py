@@ -52,6 +52,19 @@ import time
 router = APIRouter(prefix="/api/dashboard", tags=["Dashboard"])
 
 
+def _nominal_dc_kw_and_capacity_badge(plant: Optional[Plant]) -> tuple[Optional[float], Optional[str]]:
+    """Nominal DC (kW) for targets + human-readable capacity chip.
+
+    Tiger historically stores **kWp** in ``plants.capacity_mwp``; other plants store **MWp**.
+    """
+    if not plant or plant.capacity_mwp is None:
+        return None, None
+    c = float(plant.capacity_mwp)
+    if str(plant.plant_id or "").strip().lower() == "tiger":
+        return c, f"{int(round(c)):,} kWp"
+    return c * 1000.0, f"{c:g} MWp"
+
+
 def _ensure_user_plant_access(db: Session, user: User, plant_id: str) -> None:
     """Match list_plants visibility: admin sees all; else allowed_plants CSV or owner_id."""
     if getattr(user, "is_admin", False):
@@ -520,7 +533,7 @@ def station_details(
 ):
     """Return static plant metadata for the Station Details card."""
     _ensure_user_plant_access(db, current_user, plant_id)
-    cached = cache_get("station_v1", plant_id, "", "")
+    cached = cache_get("station_v2", plant_id, "", "")
     if cached is not None:
         return StationDetails(**cached)
 
@@ -532,12 +545,14 @@ def station_details(
             "technology": "Solar PV",
             "status": "Unknown",
             "capacity_mwp": None,
+            "plant_type": None,
+            "capacity_badge": None,
             "cod_date": None,
             "ppa_tariff": None,
             "plant_age_years": None,
             "location": None,
         }
-        cache_set("station_v1", plant_id, "", "", payload)
+        cache_set("station_v2", plant_id, "", "", payload)
         return StationDetails(**payload)
 
     age = None
@@ -548,18 +563,21 @@ def station_details(
         except Exception:
             pass
 
+    _, cap_badge = _nominal_dc_kw_and_capacity_badge(plant)
     payload = {
         "plant_id": plant.plant_id,
         "name": plant.name,
         "technology": plant.technology or "Solar PV",
         "status": plant.status or "Active",
         "capacity_mwp": plant.capacity_mwp,
+        "plant_type": (plant.plant_type or "SCB").strip(),
+        "capacity_badge": cap_badge,
         "cod_date": plant.cod_date,
         "ppa_tariff": plant.ppa_tariff,
         "plant_age_years": age,
         "location": plant.location,
     }
-    cache_set("station_v1", plant_id, "", "", payload)
+    cache_set("station_v2", plant_id, "", "", payload)
     return StationDetails(**payload)
 
 
@@ -966,7 +984,7 @@ def dashboard_bundle(
     """
     _ensure_user_plant_access(db, current_user, plant_id)
     _from, _to = _default_range(date_from, date_to)
-    cache_prefix = "bundle_v9" if include_target_generation else "bundle_v9_lite"
+    cache_prefix = "bundle_v10" if include_target_generation else "bundle_v10_lite"
     cached = cache_get(cache_prefix, plant_id, _from, _to)
     if cached is not None:
         logger.info(
@@ -989,7 +1007,7 @@ def dashboard_bundle(
         is not None
     )
     plant = db.query(Plant).filter(Plant.plant_id == plant_id).first()
-    cap_kw = (plant.capacity_mwp * 1000) if (plant and plant.capacity_mwp) else None
+    cap_kw, cap_badge = _nominal_dc_kw_and_capacity_badge(plant)
     spec_dc_map, arch_dc_map = _inverter_dc_maps(db, plant_id)
     plant_dc_kwp = _plant_dc_kwp_from_inverters(spec_dc_map, arch_dc_map)
 
@@ -1002,10 +1020,17 @@ def dashboard_bundle(
         except Exception:
             pass
     station = {
-        "plant_id": plant_id, "name": plant.name if plant else plant_id, "technology": (plant.technology or "Solar PV") if plant else "Solar PV",
-        "status": (plant.status or "Active") if plant else "Unknown", "capacity_mwp": plant.capacity_mwp if plant else None,
-        "cod_date": plant.cod_date if plant else None, "ppa_tariff": plant.ppa_tariff if plant else None,
-        "plant_age_years": age, "location": plant.location if plant else None,
+        "plant_id": plant_id,
+        "name": plant.name if plant else plant_id,
+        "technology": (plant.technology or "Solar PV") if plant else "Solar PV",
+        "status": (plant.status or "Active") if plant else "Unknown",
+        "capacity_mwp": plant.capacity_mwp if plant else None,
+        "plant_type": (plant.plant_type or "SCB").strip() if plant else None,
+        "capacity_badge": cap_badge,
+        "cod_date": plant.cod_date if plant else None,
+        "ppa_tariff": plant.ppa_tariff if plant else None,
+        "plant_age_years": age,
+        "location": plant.location if plant else None,
     }
 
     # ── Parallelize heavy queries ────────────────────────────────────────────

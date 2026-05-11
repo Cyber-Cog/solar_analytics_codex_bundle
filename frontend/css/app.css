@@ -1894,8 +1894,7 @@
       box-shadow: 0 14px 30px -18px currentColor;
     }
 
-    body.theme-light .kpi-card:not(.kpi-card--performance):not(.kpi-card--weather):not([class*="sub-"]),
-    body.theme-vikram .kpi-card:not(.kpi-card--performance):not(.kpi-card--weather):not([class*="sub-"]) {
+    body.theme-light .kpi-card:not(.kpi-card--performance):not(.kpi-card--weather):not([class*="sub-"]) {
       background: linear-gradient(180deg, #ffffff 0%, rgba(248,250,252,0.9) 100%);
     }
 
@@ -2157,21 +2156,6 @@
 
     body.theme-photon .avail-bar-fill {
       background: linear-gradient(90deg, #f59e0b, #ea580c);
-    }
-
-    body.theme-vikram .toggle-track {
-      background: rgba(15, 23, 42, 0.08);
-      border: 1px solid var(--line);
-    }
-
-    body.theme-vikram .toggle-track.on {
-      background: var(--accent);
-      border-color: var(--accent-strong);
-    }
-
-    body.theme-vikram .toggle-thumb {
-      background: #fff;
-      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
     }
 
     .avail-bar-track {
@@ -3197,235 +3181,141 @@
       border-color: var(--line);
     }
 
-    body.theme-vikram {
-      --bg: #f7f8fa;
-      --bg-soft: #eef1f5;
-      --panel: #ffffff;
-      --panel-2: #f8fafc;
-      --line: #d9dee6;
-      --line-soft: rgba(15, 23, 42, 0.08);
-      --text: #121821;
-      --text-soft: #3f4b5a;
-      --text-muted: #6b7788;
-      --accent: #c8102e;
-      --accent-soft: rgba(200, 16, 46, 0.1);
-      --accent-strong: rgba(200, 16, 46, 0.2);
-      --shadow: 0 12px 36px rgba(13, 18, 27, 0.08);
-      --shadow-soft: 0 4px 14px rgba(13, 18, 27, 0.06);
-      --kpi-tile-bg: #ffffff;
-      --kpi-tile-border: #e2e8f0;
-      --kpi-tile-shadow: 0 6px 20px rgba(15, 23, 42, 0.06);
-      --kpi-label-color: #64748b;
-      --kpi-unit-color: #64748b;
-      --kpi-metric-cyan: #c8102e;
-      --kpi-metric-power: #111827;
-      --kpi-metric-pr: #b91c1c;
-      --kpi-metric-plf: #334155;
-      --nav-nested-thread: rgba(200, 16, 46, 0.2);
-      --nav-nested-hover: rgba(200, 16, 46, 0.08);
-      background:
-        radial-gradient(circle at top right, rgba(200, 16, 46, 0.08), transparent 42%),
-        linear-gradient(180deg, #f7f8fa 0%, #eef2f6 48%, #e8edf3 100%);
-      color: var(--text);
-    }
 
-    body.theme-vikram .sidebar {
       background: rgba(255, 255, 255, 0.97);
       border-right-color: var(--line);
     }
 
-    body.theme-vikram .sidebar-logo h1,
-    body.theme-vikram .sidebar-logo-title,
-    body.theme-vikram .topbar-title {
       color: var(--text);
     }
 
-    body.theme-vikram .nav-item {
       color: var(--text-soft);
     }
 
-    body.theme-vikram .nav-item:hover {
       background: rgba(200, 16, 46, 0.06);
       color: var(--text);
     }
 
-    body.theme-vikram .nav-item.active {
       background: var(--accent-soft);
       border-color: var(--accent-strong);
       color: var(--accent);
     }
 
-    body.theme-vikram .sidebar-nav {
       scrollbar-color: rgba(200, 16, 46, 0.22) transparent;
     }
 
-    body.theme-vikram .sidebar-nav:hover {
       scrollbar-color: rgba(200, 16, 46, 0.48) transparent;
     }
 
-    body.theme-vikram .sidebar-nav::-webkit-scrollbar-thumb {
       background: rgba(200, 16, 46, 0.22);
     }
 
-    body.theme-vikram .sidebar-nav:hover::-webkit-scrollbar-thumb,
-    body.theme-vikram .sidebar-nav::-webkit-scrollbar-thumb:hover {
       background: rgba(200, 16, 46, 0.48);
     }
 
-    body.theme-vikram .nav-sublist {
       background: rgba(200, 16, 46, 0.04);
       border-left-color: var(--nav-nested-thread);
     }
 
-    body.theme-vikram .nav-item-sub.active {
       color: var(--accent);
       background: var(--accent-soft);
       border: none;
     }
 
-    body.theme-vikram button.nav-item-sub-btn {
       background: transparent;
       border: none;
       color: var(--text-soft);
       box-shadow: none;
     }
 
-    body.theme-vikram button.nav-item-sub-btn:hover {
       background: var(--nav-nested-hover);
       color: var(--text);
     }
 
-    body.theme-vikram .sidebar-footer {
       background: linear-gradient(180deg, transparent 0%, rgba(255, 250, 251, 0.95) 40%);
     }
 
-    body.theme-vikram .topbar {
       background: rgba(255, 255, 255, 0.92);
       border-bottom-color: var(--line);
     }
 
-    body.theme-vikram .plant-selector,
-    body.theme-vikram .date-input,
-    body.theme-vikram .form-input,
-    body.theme-vikram .search-input {
       background: #fff;
       border-color: var(--line);
       color: var(--text);
       color-scheme: light;
     }
 
-    body.theme-vikram .plant-selector select {
       color: var(--text);
     }
 
-    body.theme-vikram .card,
-    body.theme-vikram .kpi-card:not(.kpi-card--performance),
-    body.theme-vikram .modal-box {
       background: var(--panel);
       border-color: var(--line);
       box-shadow: var(--shadow-soft);
     }
 
-    body.theme-vikram .card-header {
       background: rgba(248, 250, 252, 0.9);
       border-bottom-color: var(--line-soft);
     }
 
-    body.theme-vikram .btn-outline {
       color: var(--text);
       background: #fff;
       border-color: var(--line);
     }
 
-    body.theme-vikram .btn-primary {
       color: #fff;
       background: linear-gradient(135deg, #e11d48, #c8102e);
       box-shadow: 0 8px 20px rgba(200, 16, 46, 0.24);
     }
 
-    body.theme-vikram .metadata-tab {
       background: #fff;
       border-color: var(--line);
       color: var(--text-soft);
     }
 
-    body.theme-vikram .metadata-tab.active {
       color: #fff;
       background: linear-gradient(135deg, #e11d48, #c8102e);
     }
 
-    body.theme-vikram .chart-tooltip,
-    body.theme-vikram .recharts-default-tooltip {
       background: rgba(255, 255, 255, 0.98) !important;
       border: 1px solid var(--line) !important;
       color: var(--text) !important;
     }
 
-    @keyframes vikramMeshMove {
-      0% {
-        background-position: 0% 0%, 100% 0%, 50% 50%;
-      }
 
-      50% {
-        background-position: 100% 30%, 0% 70%, 50% 50%;
-      }
 
-      100% {
-        background-position: 0% 0%, 100% 0%, 50% 50%;
-      }
-    }
-
-    body.theme-vikram {
-      background:
-        radial-gradient(circle at 12% 10%, rgba(200, 16, 46, 0.16), transparent 38%),
-        radial-gradient(circle at 88% 0%, rgba(239, 68, 68, 0.14), transparent 34%),
-        linear-gradient(180deg, #f7f9fc 0%, #eef2f8 52%, #e8edf4 100%);
-      background-size: 140% 140%, 140% 140%, 100% 100%;
-      animation: vikramMeshMove 18s ease-in-out infinite;
-    }
-
-    body.theme-vikram .sidebar {
       background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(251, 252, 254, 0.98) 100%);
       box-shadow: 10px 0 28px rgba(17, 24, 39, 0.04);
     }
 
-    body.theme-vikram .sidebar-logo {
       background: linear-gradient(90deg, rgba(200, 16, 46, 0.05), rgba(255, 255, 255, 0));
     }
 
-    body.theme-vikram .topbar {
       background: rgba(255, 255, 255, 0.80);
       border-bottom-color: rgba(188, 201, 220, 0.7);
       backdrop-filter: blur(14px);
     }
 
-    body.theme-vikram .hamburger-btn {
       background: linear-gradient(180deg, #ffffff, #f5f7fb);
       border-color: rgba(200, 16, 46, 0.18);
       color: #8b1028;
     }
 
-    body.theme-vikram .hamburger-btn:hover {
       background: linear-gradient(180deg, #fff, #fff0f3);
       border-color: rgba(200, 16, 46, 0.34);
       color: #6f0d20;
     }
 
-    body.theme-vikram .nav-item {
       position: relative;
       transition: all 0.16s ease;
     }
 
-    body.theme-vikram .nav-item:hover {
       transform: translateX(2px);
     }
 
-    body.theme-vikram .nav-item.active {
       background: linear-gradient(90deg, rgba(200, 16, 46, 0.14), rgba(200, 16, 46, 0.04));
       color: #9f1239;
     }
 
-    body.theme-vikram .nav-item.active::before {
       content: '';
       position: absolute;
       left: -6px;
@@ -3436,62 +3326,48 @@
       background: linear-gradient(180deg, #e11d48, #b91c1c);
     }
 
-    body.theme-vikram .card,
-    body.theme-vikram .kpi-card:not(.kpi-card--performance),
-    body.theme-vikram .modal-box {
       border-color: rgba(185, 198, 216, 0.7);
       box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08);
       backdrop-filter: blur(8px);
     }
 
-    body.theme-vikram .card-header {
       background: linear-gradient(90deg, rgba(200, 16, 46, 0.06), rgba(255, 255, 255, 0.65));
     }
 
-    body.theme-vikram .btn-outline {
       background: linear-gradient(180deg, #fff, #f8fafd);
       border-color: #d0d8e4;
     }
 
-    body.theme-vikram .btn-outline:hover {
       border-color: rgba(200, 16, 46, 0.28);
       background: linear-gradient(180deg, #fff, #fff0f3);
       color: #7d1027;
     }
 
-    body.theme-vikram .btn-primary {
       background: linear-gradient(135deg, #e11d48, #c8102e 55%, #9f1239);
       box-shadow: 0 10px 24px rgba(200, 16, 46, 0.26);
     }
 
-    body.theme-vikram .btn-primary:hover {
       filter: brightness(1.03);
       box-shadow: 0 14px 28px rgba(200, 16, 46, 0.3);
     }
 
-    body.theme-vikram .user-menu-dropdown {
       background: rgba(255, 255, 255, 0.98);
       border-color: #d5dce7;
       box-shadow: 0 18px 30px rgba(15, 23, 42, 0.12);
     }
 
-    body.theme-vikram .user-menu-item.active {
       color: #9f1239;
       background: rgba(200, 16, 46, 0.10);
       border-color: rgba(200, 16, 46, 0.24);
     }
 
-    body.theme-vikram .sidebar-logo {
       position: relative;
       padding-bottom: 34px;
     }
 
-    body.theme-vikram .sidebar-logo h1,
-    body.theme-vikram .sidebar-logo-title {
       opacity: 0.25;
     }
 
-    body.theme-vikram .sidebar-logo::after {
       content: 'Vikram Solar';
       position: absolute;
       left: 12px;
@@ -3508,25 +3384,21 @@
       line-height: 1;
     }
 
-    body.theme-vikram .page-content {
       background:
         radial-gradient(circle at 8% -10%, rgba(200, 16, 46, 0.12), transparent 28%),
         radial-gradient(circle at 92% 0%, rgba(239, 68, 68, 0.10), transparent 25%);
     }
 
-    body.theme-vikram .card {
       background: linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(255, 255, 255, 0.90));
       border: 1px solid rgba(184, 196, 214, 0.72);
       border-radius: 18px;
       box-shadow: 0 16px 34px rgba(15, 23, 42, 0.09), inset 0 1px 0 rgba(255, 255, 255, 0.85);
     }
 
-    body.theme-vikram .card-header {
       background: linear-gradient(90deg, rgba(229, 35, 66, 0.10), rgba(255, 255, 255, 0.72));
       border-bottom: 1px solid rgba(211, 221, 234, 0.9);
     }
 
-    body.theme-vikram table thead th {
       background: linear-gradient(180deg, #b5122f, #8e1028) !important;
       color: #f8fafc !important;
       border-bottom-color: rgba(255, 255, 255, 0.18);
@@ -3534,37 +3406,30 @@
       font-size: 10px;
     }
 
-    body.theme-vikram table tbody td {
       background: rgba(255, 255, 255, 0.88);
       color: #111827;
       border-bottom-color: rgba(203, 213, 225, 0.75);
     }
 
-    body.theme-vikram table tbody tr:hover td {
       background: rgba(255, 241, 243, 0.95);
     }
 
-    body.theme-vikram .kpi-card {
       border-radius: 16px;
       background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(249, 250, 252, 0.94));
       border: 1px solid rgba(208, 218, 232, 0.88);
     }
 
-    body.theme-vikram .kpi-card .kpi-value {
       color: #111827;
     }
 
-    body.theme-vikram .badge-red {
       background: rgba(200, 16, 46, 0.14);
       color: #9f1239;
       border-color: rgba(200, 16, 46, 0.26);
     }
 
-    body.theme-vikram .btn-primary {
       border: 1px solid rgba(255, 255, 255, 0.32);
     }
 
-    body.theme-vikram .float-btn {
       background: linear-gradient(140deg, #e11d48, #be123c);
       color: #fff;
       box-shadow: 0 10px 24px rgba(190, 18, 60, 0.28);

@@ -63,12 +63,12 @@ const SOLAR_THEME_IDS = new Set([
   'photon',
   'dark_ocean', 'dark_ink', 'dark_forest',
   'light_paper', 'light_air', 'light_sand',
-  'vikram',
 ]);
 
 function normalizeSolarThemeId(x) {
   if (x == null || x === '') return 'photon';
   const s = String(x).trim();
+  if (s === 'vikram') return 'photon';
   if (s === 'dark') return 'dark_ocean';
   if (s === 'light') return 'light_paper';
   if (!SOLAR_THEME_IDS.has(s)) return 'photon';
@@ -82,7 +82,6 @@ function applySolarThemeToDocument(tid) {
     .forEach((c) => { body.classList.remove(c); });
   body.classList.remove('theme-light', 'theme-vikram', 'theme-photon');
   body.setAttribute('data-solar-theme', t);
-  if (t === 'vikram') { body.classList.add('theme-vikram'); return; }
   /** Lovable “Photon Intelligence” look — light shell, warm sidebar, soft orange active nav. */
   if (t === 'photon') { body.classList.add('theme-light', 'theme-photon'); return; }
   if (t.indexOf('light_') === 0) body.classList.add('theme-light');
@@ -164,7 +163,6 @@ function Topbar({ page, plants, plantId, onPlantChange, onAddPlant, dateFrom, da
                 }, labels[id] || id);
               }),
             ),
-            h('button', { className: `user-menu-item ${theme === 'vikram' ? 'active' : ''}`, onClick: () => { onThemeSelect('vikram'); setShowUserMenu(false); } }, 'Vikram Solar'),
           ),
         ),
       ),

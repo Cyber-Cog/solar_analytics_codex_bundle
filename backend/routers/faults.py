@@ -61,17 +61,17 @@ router = APIRouter(prefix="/api/faults", tags=["Faults"])
 DS_SUMMARY_PAYLOAD_VERSION = 9
 # Bump when unified-feed category semantics change (e.g. IS energy/count) so DB
 # unified_fault_snapshot rows are not served stale for exact date_from/date_to keys.
-UNIFIED_FAULT_PAYLOAD_VERSION = 11
+UNIFIED_FAULT_PAYLOAD_VERSION = 12
 GB_TAB_PAYLOAD_VERSION = 2
 DS_MIN_CONFIRMED_POINTS = int(os.getenv("DS_MIN_CONFIRMED_POINTS", "3"))
 
 _MEM_PL_PAGE = "faults_pl_page_v2"
-_MEM_IS_TAB = "faults_is_tab_v7_unified_payload_v11"
+_MEM_IS_TAB = "faults_is_tab_v8_unified_payload_v12"
 _MEM_GB_TAB = "faults_gb_tab_v4_pr_loss"
 _MEM_COMM_TAB = "faults_comm_tab_v2"
-_MEM_INV_EFF_AGG = "faults_inv_eff_agg_v3"
+_MEM_INV_EFF_AGG = "faults_inv_eff_agg_v4"
 _MEM_CD_TAB = "faults_cd_tab_v3_fast"
-_MEM_RUNTIME_TABS_BUNDLE = "faults_runtime_tabs_bundle_v13_unified_v11"
+_MEM_RUNTIME_TABS_BUNDLE = "faults_runtime_tabs_bundle_v14_unified_v12"
 
 def _compute_inv_eff_aggregate(
     db: Session, plant_id: str, _from: str, _to: str
@@ -2413,6 +2413,25 @@ def get_inverter_efficiency_analysis(
     - Per-Inverter Stats (for Bar Chart & Box Plot)
     - Time-series Trend (Actual vs Target)
     """
+    try:
+        return _compute_inverter_efficiency_analysis_payload(plant_id, date_from, date_to, db)
+    except Exception as exc:
+        _log.exception("inverter_efficiency_analysis plant=%s", plant_id)
+        return {
+            "metrics": {},
+            "inverters": [],
+            "trend": [],
+            "inverter_box_stats": [],
+            "compute_error": (str(exc) or "analysis_failed")[:500],
+        }
+
+
+def _compute_inverter_efficiency_analysis_payload(
+    plant_id: str,
+    date_from: Optional[str],
+    date_to: Optional[str],
+    db: Session,
+):
     from sqlalchemy import text
     import pandas as pd
     import numpy as np

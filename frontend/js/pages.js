@@ -417,7 +417,10 @@ window.DashboardPage = ({ plantId, dateFrom, dateTo, onNavigate }) => {
   // ── Minimal hero data (only used for status strip, NOT duplicating KPI tiles) ──
   const heroStatus   = station?.status || 'Unknown';
   const heroOnline   = heroStatus === 'Active' || heroStatus === 'active';
-  const heroCapacity = station?.capacity_mwp ? `${station.capacity_mwp} MWp` : null;
+  const heroCapacity = station?.capacity_badge
+    || (station?.capacity_mwp != null && station?.capacity_mwp !== ''
+      ? `${station.capacity_mwp} MWp`
+      : null);
 
   return h('div', { style: { position: 'relative' } },
     dashboardLoading && h('div', {

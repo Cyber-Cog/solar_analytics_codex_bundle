@@ -87,6 +87,20 @@ def _ensure_equipment_spec_loss_columns():
         pass
 
 
+def _ensure_precompute_job_spec_json_column():
+    """PostgreSQL: selective precompute modules (Admin UI) — safe IF NOT EXISTS."""
+    try:
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "ALTER TABLE precompute_jobs ADD COLUMN IF NOT EXISTS job_spec_json TEXT"
+                )
+            )
+    except Exception:
+        pass
+
+
 # ── Create all tables on startup (safe: only creates if not exists) ───────────
 # Skip schema writes in serverless mode. Vercel Functions should boot fast and
 # should not depend on running DDL successfully during module import.
@@ -99,6 +113,11 @@ elif not IS_SERVERLESS and _skip_create:
     print("[schema] SOLAR_SKIP_CREATE_ALL=1 — skipping create_all (use Alembic)")
 if not IS_SERVERLESS:
     _ensure_equipment_spec_loss_columns()
+    _ensure_precompute_job_spec_json_column()
+else:
+    # Vercel / serverless: still add missing columns so Admin precompute & ORM match
+    # without a separate Alembic run (fast IF NOT EXISTS on Postgres).
+    _ensure_precompute_job_spec_json_column()
 
 # ── Apply pending SAFE migrations (migrations/sql/*.sql) ──────────────────────
 # Risky migrations (type changes, partitioning) live under migrations/manual/

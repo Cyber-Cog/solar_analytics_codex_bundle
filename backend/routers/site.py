@@ -34,7 +34,6 @@ ALLOWED_ORG_THEMES = frozenset(
         "light_paper",
         "light_air",
         "light_sand",
-        "vikram",
         "dark",
         "light",
     }
@@ -43,6 +42,8 @@ ALLOWED_ORG_THEMES = frozenset(
 
 def _normalize_theme_id(raw: Optional[str]) -> str:
     t = (raw or "").strip() or "photon"
+    if t == "vikram":
+        return "photon"
     if t == "dark":
         return "dark_ocean"
     if t == "light":

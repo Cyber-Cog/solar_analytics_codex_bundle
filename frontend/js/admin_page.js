@@ -30,7 +30,6 @@ window.AdminPage = (props = {}) => {
     { id: 'light_paper', label: 'Light · Paper' },
     { id: 'light_air', label: 'Light · Air' },
     { id: 'light_sand', label: 'Light · Sand' },
-    { id: 'vikram', label: 'Vikram Solar' },
   ];
   const [appearanceDraft, setAppearanceDraft] = useState(() => orgDefaultTheme || 'photon');
   const [appearanceSaving, setAppearanceSaving] = useState(false);

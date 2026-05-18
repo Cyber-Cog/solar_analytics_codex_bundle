@@ -38,10 +38,15 @@ PL_DAY = "2026-03-11"
 COMM_DAY = "2026-03-12"
 CD_DAY = "2026-03-13"
 DERATE_DAY = "2026-03-08"
+GB_DAY = "2026-03-03"  # real grid breakdown: all inverters down 11:00–13:00
 SOILING_CLEAN_DAY = "2026-03-07"
 SOILING_RAIN_DAY = "2026-03-10"
-BYPASS_DAY = "2026-03-06"
-MODULE_DAMAGE_DAY = "2026-03-05"
+# Bypass diode persists for 7 days (2026-03-01 to 2026-03-07)
+BYPASS_DAY_START = "2026-03-01"
+BYPASS_DAY_END = "2026-03-07"
+# Module damage persists for 10 days (2026-03-01 to 2026-03-10)
+MODULE_DAMAGE_DAY_START = "2026-03-01"
+MODULE_DAMAGE_DAY_END = "2026-03-10"
 
 BYPASS_SCB = "INV-01-SCB-02"
 MODULE_DAMAGE_SCB = "INV-02-SCB-01"
@@ -165,7 +170,7 @@ def _solar_gti(ts: datetime, rng: np.random.Generator) -> float:
 
 
 def _healthy_scb_current(gti: float, rng: np.random.Generator) -> float:
-    if gti < 150.0:
+    if gti < 10.0:
         return 0.0
     scale = gti / REF_GTI
     per_string = ISC_PER_STRING_A * scale
@@ -174,15 +179,24 @@ def _healthy_scb_current(gti: float, rng: np.random.Generator) -> float:
 
 
 def _healthy_ac_kw(gti: float, inv_index: int, rng: np.random.Generator) -> float:
-    if gti < 150.0:
+    """Inverters ramp from 0 at GTI=0 to full power at GTI≥REF_GTI.
+    Threshold lowered to 10 W/m² so dawn/dusk samples produce small but non-zero
+    AC power — this prevents false grid-breakdown events at sunrise/sunset.
+    """
+    if gti < 10.0:
         return 0.0
     eff = 0.96 if inv_index == 0 else 0.92 + 0.02 * (inv_index % 3)
     nominal = AC_RATED_KW * eff * (gti / REF_GTI)
-    return float(max(0.0, min(AC_RATED_KW * 0.99, nominal + rng.normal(0.0, 0.8))))
+    return float(max(0.05, min(AC_RATED_KW * 0.99, nominal + rng.normal(0.0, 0.8))))
 
 
 def _pl_limit_factor(hm: int) -> float:
-    """Smooth U-shaped AC suppression for power-limitation demo (10:15–16:00)."""
+    """Sharp drop at start of power-limitation window — needed for trigger condition.
+
+    The PL engine requires a ≥ 30% step drop versus the rolling max.  Removing
+    the 30-min ramp ensures the first sample inside the window (10:15) drops
+    immediately to ~60% of normal, giving a 40% delta that fires the trigger.
+    """
     start = 10 * 60 + 15
     end = 16 * 60
     if hm < start or hm > end:
@@ -190,24 +204,26 @@ def _pl_limit_factor(hm: int) -> float:
     mid = (start + end) / 2.0
     half = (end - start) / 2.0
     x = (hm - mid) / half
-    u = 0.42 + 0.18 * (x * x)
-    if hm < start + 30:
-        ramp = (hm - start) / 30.0
-        return 1.0 - (1.0 - u) * max(0.0, min(1.0, ramp))
-    return u
+    # U-shape: 0.60 at edges, 0.40 at deepest midday — no ramp
+    return float(0.40 + 0.20 * x * x)
 
 
 def _derate_factor(hm: int) -> float:
-    """Pronounced U-shaped (cup) static derate in midday — normal morning & evening."""
-    start_hm = 10 * 60 + 30
-    end_hm = 15 * 60 + 30
+    """Deep U-shaped (cup) static derate: clear depression all through 10:00–16:00.
+
+    Designed to ensure the CD engine detects the full derating window:
+      - Window edges (10:00 / 16:00): factor 0.75  → 25% below virtual
+      - Midday (~13:00):              factor 0.62  → 38% below virtual
+    Morning before 10:00 and evening after 16:00 are completely normal (factor=1.0).
+    """
+    start_hm = 10 * 60
+    end_hm = 16 * 60
     if hm < start_hm or hm > end_hm:
         return 1.0
     mid = (start_hm + end_hm) / 2.0
     half = (end_hm - start_hm) / 2.0
     x = (hm - mid) / half
-    # Deepest at midday (0.73), recovers to ~0.88 at window edges
-    return float(0.73 + 0.15 * x * x)
+    return float(0.62 + 0.13 * x * x)
 
 
 def _soiling_cpr_factor(day: str, scb: str, day_index: int, d0s: str) -> float:
@@ -223,15 +239,17 @@ def _soiling_cpr_factor(day: str, scb: str, day_index: int, d0s: str) -> float:
 
 
 def _scb_voltage_v(scb: str, day: str, hm: int, rng: np.random.Generator) -> float:
-    """Generate SCB DC voltage.  Fault deviations are expressed as % of reference
-    so they are clearly visible in the investigate chart.
-    Bypass diode: ~5% V drop on BYPASS_SCB.
-    Module damage: ~11% V drop on MODULE_DAMAGE_SCB.
+    """Generate SCB DC voltage with persistent fault deviations.
+
+    Bypass diode (INV-01-SCB-02): 5% V drop, persists 7 days (2026-03-01 – 2026-03-07).
+    Module damage (INV-02-SCB-01): 11% V drop, persists 10 days (2026-03-01 – 2026-03-10).
+    Fault active during daytime only (GTI > 0, i.e. 09:00–16:00).
     """
     v = DC_VOLTAGE_V + rng.normal(0.0, 0.15)
-    if scb == BYPASS_SCB and day == BYPASS_DAY and 9 * 60 <= hm <= 16 * 60:
+    daytime = 9 * 60 <= hm <= 16 * 60
+    if scb == BYPASS_SCB and daytime and BYPASS_DAY_START <= day <= BYPASS_DAY_END:
         v = DC_VOLTAGE_V * 0.95 + rng.normal(0.0, 0.10)
-    if scb == MODULE_DAMAGE_SCB and day == MODULE_DAMAGE_DAY and 9 * 60 <= hm <= 16 * 60:
+    if scb == MODULE_DAMAGE_SCB and daytime and MODULE_DAMAGE_DAY_START <= day <= MODULE_DAMAGE_DAY_END:
         v = DC_VOLTAGE_V * 0.89 + rng.normal(0.0, 0.10)
     return float(v)
 
@@ -253,14 +271,16 @@ def _apply_faults(
         if 7 * 60 + 30 <= hm <= 16 * 60 and gti >= 200.0:
             scb_a = scb_a * 0.55
 
+    if day == GB_DAY and 11 * 60 <= hm < 13 * 60 and gti > 200.0:
+        # Real grid breakdown: all inverters offline 11:00–13:00 on GB_DAY
+        ac_kw = 0.0
+
     if day == IS_DAY and inv == "INV-02":
         if 10 * 60 <= hm < 14 * 60 and gti > 10.0:
             ac_kw = 0.0
 
-    if day == PL_DAY and inv == "INV-03" and gti > 500.0:
-        if hm < 10 * 60 + 15:
-            pass
-        elif hm <= 15 * 60 + 59:
+    if day == PL_DAY and inv == "INV-03":
+        if 10 * 60 + 15 <= hm <= 16 * 60 and gti > 300.0:
             ac_kw = ac_kw * _pl_limit_factor(hm)
 
     if day == CD_DAY and inv == "INV-01":
@@ -269,7 +289,7 @@ def _apply_faults(
         elif gti >= 200.0 and gti <= 680.0 and hm < 10 * 60:
             ac_kw = min(AC_RATED_KW * 0.84, AC_RATED_KW * 0.96 * (gti / REF_GTI))
 
-    if day == DERATE_DAY and inv == "INV-02" and gti >= 400.0:
+    if day == DERATE_DAY and inv == "INV-02" and gti >= 50.0:
         ac_kw = ac_kw * _derate_factor(hm)
 
     if scb:

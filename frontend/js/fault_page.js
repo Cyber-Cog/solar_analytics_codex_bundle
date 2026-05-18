@@ -1365,10 +1365,13 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
     (subView === 'clip' || subView === 'derate') && (() => {
       const isClip = subView === 'clip';
       const cat = isClip ? 'clip' : 'derate';
+      // Only show inverters whose DOMINANT behaviour matches the active tab.
+      // An inverter with mostly derating loss but a tiny clip loss stays in the Derate tab.
       const rowsForTab = cdRows.filter((r) => {
-        const clipLoss = Number(r.loss_power_clipping_kwh || 0) + Number(r.loss_current_clipping_kwh || 0);
-        const derateLoss = Number(r.loss_static_derating_kwh || 0) + Number(r.loss_dynamic_derating_kwh || 0);
-        return isClip ? clipLoss > 0 : derateLoss > 0;
+        const dk = r.dominant_kind || '';
+        return isClip
+          ? (dk === 'power_clip' || dk === 'current_clip')
+          : (dk === 'static_derate' || dk === 'dynamic_derate');
       });
       const invLossForTab = (cdSummary?.inverter_loss || []).filter((r) => r.category === cat);
       const dq = cdSummary?.data_quality || {};
@@ -1473,7 +1476,7 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
           h(window.EChart, {
             style: { width: '100%', height: 320 },
             option: {
-              tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: (params) => `${params[0].name}<br/>${params[0].marker} ${params[0].seriesName}: <b>${Number(params[0].value).toFixed(2)} kWh</b>`, backgroundColor: '#0f172a', borderColor: '#1e293b', textStyle: { color: '#f8fafc', fontSize: 12 } },
+              tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, confine: true, formatter: (params) => `${params[0].name}<br/>${params[0].marker} ${params[0].seriesName}: <b>${Number(params[0].value).toFixed(2)} kWh</b>`, backgroundColor: 'var(--panel)', borderColor: 'var(--line)', textStyle: { color: 'var(--text)', fontSize: 12 } },
               grid: { top: 10, right: 10, left: 45, bottom: 60 },
               xAxis: { type: 'category', data: invLossForTab.map(d=>d.inverter_id), axisLabel: { fontSize: 10, color: '#94a3b8', rotate: 35 }, axisLine: { lineStyle: { color: '#1e293b' } }, axisTick: {show:false} },
               yAxis: { type: 'value', name: 'kWh', nameLocation: 'middle', nameGap: 30, nameTextStyle: { color: '#94a3b8', fontSize: 10 }, axisLabel: { fontSize: 10, color: '#94a3b8' }, splitLine: { lineStyle: { type: 'dashed', color: '#1e293b' } } },
@@ -1499,24 +1502,28 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
     // ── Investigate modal (shared between Clipping & Derating tabs) ──
     (subView === 'clip' || subView === 'derate') && selectedCdInverter && ReactDOM.createPortal(
         h('div', {
-          style: { position: 'fixed', inset: 0, background: 'rgba(2,6,23,0.72)', zIndex: 1200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 },
-          onClick: () => { setSelectedCdKind(null); setSelectedCdInverter(null); }
+          className: 'modal-overlay',
+          style: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 99999, display: 'flex', alignItems: 'center', justifyContent: 'center' },
+          onClick: (e) => { if (e.target === e.currentTarget) { setSelectedCdKind(null); setSelectedCdInverter(null); } }
         },
           h('div', {
+            className: 'modal-content',
             onClick: (e) => e.stopPropagation(),
-            style: { background: 'var(--surface, #0f172a)', border: '1px solid var(--border, #1e293b)', borderRadius: 14, width: 'min(1180px, 96vw)', maxHeight: '92vh', overflow: 'auto', padding: 20, boxShadow: '0 30px 60px rgba(0,0,0,0.5)' }
+            style: { background: 'var(--panel)', borderRadius: 12, width: 'min(1100px, 96vw)', maxHeight: '90vh', overflow: 'auto', padding: 24 }
           },
-            h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 } },
-              h('div', null,
-                h('div', { style: { fontSize: 18, fontWeight: 700, color: 'var(--text, #e2e8f0)' } }, `Investigate · ${selectedCdInverter}`),
-                h('div', { style: { fontSize: 12, color: 'var(--text-soft, #94a3b8)', marginTop: 2 } }, 'Actual AC power vs GTI-derived virtual curve. Coloured bands mark clipping / derating minutes.')
+            h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 } },
+              h('h3', { style: { margin: 0 } },
+                selectedCdKind === 'clip' ? `Clipping: ${selectedCdInverter}` : `Derating: ${selectedCdInverter}`
               ),
-              h('button', { className: 'btn', onClick: () => { setSelectedCdKind(null); setSelectedCdInverter(null); }, style: { padding: '6px 12px' } }, '✕ Close')
+              h('button', { className: 'btn btn-outline', onClick: () => { setSelectedCdKind(null); setSelectedCdInverter(null); } }, 'Close')
+            ),
+            h('div', { style: { color: 'var(--text-muted)', fontSize: 13, marginBottom: 12 } },
+              'Actual AC power vs GTI-derived virtual curve. Coloured bands mark clipping / derating minutes.'
             ),
 
-            cdTimelineLoading && h('div', { style: { padding: 40, textAlign: 'center', color: 'var(--text-soft)' } }, h(Spinner), ' Loading timeline…'),
+            cdTimelineLoading && h('div', { style: { padding: 40, textAlign: 'center' } }, h(Spinner), ' Loading timeline…'),
 
-            !cdTimelineLoading && cdTimeline.length === 0 && h('div', { style: { padding: 40, textAlign: 'center', color: 'var(--text-soft)' } }, 'No timeline data for this inverter in the selected range.'),
+            !cdTimelineLoading && cdTimeline.length === 0 && h('div', { className: 'empty-state', style: { minHeight: 180 } }, 'No timeline data for this inverter in the selected range.'),
 
               !cdTimelineLoading && cdTimeline.length > 0 && (() => {
               // ECharts CD timeline — replaces legacy ComposedChart (Recharts removed)
@@ -1554,10 +1561,10 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
                 tooltip: {
                   trigger: 'axis',
                   confine: true,
-                  backgroundColor: '#0f172a',
-                  borderColor: '#1e293b',
-                  textStyle: { color: '#f8fafc', fontSize: 12 },
-                  axisPointer: { type: 'line', lineStyle: { type: 'dashed', color: '#475569' } },
+                  backgroundColor: 'var(--panel)',
+                  borderColor: 'var(--line)',
+                  textStyle: { color: 'var(--text)', fontSize: 12 },
+                  axisPointer: { type: 'line', lineStyle: { type: 'dashed', color: '#94a3b8' } },
                   formatter: (params) => {
                     if (!params || !params.length) return '';
                     const head = `<div style="font-weight:600;margin-bottom:4px">${params[0].axisValue || ''}</div>`;
@@ -1569,21 +1576,21 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
                     return head + lines.join('');
                   },
                 },
-                legend: { bottom: 0, data: legendNames, textStyle: { color: 'var(--text-soft, #94a3b8)', fontSize: 12 } },
+                legend: { bottom: 0, data: legendNames, textStyle: { color: '#64748b', fontSize: 12 } },
                 toolbox: {
                   right: 8,
                   feature: { dataZoom: { yAxisIndex: 'none' }, restore: {}, saveAsImage: {} },
-                  iconStyle: { borderColor: 'var(--text-soft, #94a3b8)' },
+                  iconStyle: { borderColor: '#94a3b8' },
                 },
                 dataZoom: [
                   { type: 'inside', xAxisIndex: 0 },
-                  { type: 'slider', xAxisIndex: 0, height: 18, bottom: 28, borderColor: 'var(--border, #1e293b)', textStyle: { color: 'var(--text-soft)' } },
+                  { type: 'slider', xAxisIndex: 0, height: 18, bottom: 28 },
                 ],
                 grid: { top: 20, right: 80, left: 60, bottom: 88 },
-                xAxis: { type: 'category', data: xData, axisLabel: { color: 'var(--text-soft, #94a3b8)', fontSize: 10 }, axisLine: { lineStyle: { color: 'var(--border, #1e293b)' } } },
+                xAxis: { type: 'category', data: xData, axisLabel: { color: '#64748b', fontSize: 10 }, axisLine: { lineStyle: { color: '#e2e8f0' } } },
                 yAxis: [
-                  { name: 'Power (kW)', type: 'value', axisLabel: { color: 'var(--text-soft, #94a3b8)', fontSize: 10 }, axisLine: { lineStyle: { color: 'var(--border, #1e293b)' } }, splitLine: { lineStyle: { color: 'var(--border, #1e293b)', type: 'dashed' } } },
-                  { name: 'GTI (W/m²)', type: 'value', position: 'right', axisLabel: { color: '#f59e0b', fontSize: 10 }, axisLine: { lineStyle: { color: '#f59e0b' } }, splitLine: { show: false } },
+                  { name: 'Power (kW)', type: 'value', axisLabel: { color: '#64748b', fontSize: 10 }, axisLine: { lineStyle: { color: '#e2e8f0' } }, splitLine: { lineStyle: { color: '#e2e8f0', type: 'dashed' } }, nameTextStyle: { color: '#64748b', fontSize: 10 } },
+                  { name: 'GTI (W/m²)', type: 'value', position: 'right', axisLabel: { color: '#f59e0b', fontSize: 10 }, axisLine: { lineStyle: { color: '#f59e0b' } }, splitLine: { show: false }, nameTextStyle: { color: '#f59e0b', fontSize: 10 } },
                 ],
                 series: [
                   { name: 'Virtual (expected)', type: 'line', yAxisIndex: 0, data: timelineForView.map(d => d.virtual_ac_kw), lineStyle: { color: '#10b981', width: 2, type: 'dashed' }, symbol: 'none', markArea: markAreas.length ? { silent: true, data: markAreas } : undefined },
@@ -2074,24 +2081,30 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
 
     subView === 'damage' && selectedDamageScb && ReactDOM.createPortal(
       h('div', {
-        style: { position: 'fixed', inset: 0, background: 'rgba(2,6,23,0.72)', zIndex: 1200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 },
-        onClick: () => setSelectedDamageScb(null),
+        className: 'modal-overlay',
+        style: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 99999 },
+        onClick: (e) => { if (e.target === e.currentTarget) setSelectedDamageScb(null); },
       },
         h('div', {
+          className: 'modal-content',
           onClick: (e) => e.stopPropagation(),
-          style: { background: 'var(--surface, #0f172a)', border: '1px solid var(--border, #1e293b)', borderRadius: 14, width: 'min(1100px, 96vw)', maxHeight: '92vh', overflow: 'auto', padding: 20, boxShadow: '0 30px 60px rgba(0,0,0,0.5)' },
+          style: { background: 'var(--panel)', borderRadius: 12, padding: 24, width: 'min(1060px, 96vw)', maxHeight: '90vh', overflow: 'auto' },
         },
-          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 } },
-            h('div', null,
-              h('div', { style: { fontSize: 18, fontWeight: 700, color: 'var(--text, #e2e8f0)' } }, `Investigate · ${selectedDamageScb}`),
-              h('div', { style: { fontSize: 12, color: 'var(--text-soft, #94a3b8)', marginTop: 2 } }, 'SCB voltage vs plant reference  ·  Fault bands: orange = bypass diode (3–8% drop), red = module damage (8–30% drop)'),
-            ),
-            h('button', { className: 'btn', onClick: () => setSelectedDamageScb(null), style: { padding: '6px 12px' } }, '✕ Close'),
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 } },
+            h('h3', { style: { margin: 0 } }, `Bypass / Module Damage: ${selectedDamageScb}`),
+            h('button', { className: 'btn btn-outline', onClick: () => setSelectedDamageScb(null) }, 'Close'),
           ),
-          damageTimelineLoading && h('div', { style: { padding: 40, textAlign: 'center', color: 'var(--text-soft)' } }, h(Spinner), ' Loading timeline…'),
-          !damageTimelineLoading && damageTimeline.length === 0 && h('div', { style: { padding: 40, textAlign: 'center', color: 'var(--text-soft)' } }, 'No voltage data for this SCB in the selected range.'),
+          h('div', { style: { color: 'var(--text-muted)', fontSize: 13, marginBottom: 12 } },
+            'SCB DC voltage vs plant reference (top-quartile). Orange band = bypass diode (3–8% drop). Red band = module damage (8–30% drop).',
+          ),
+          damageTimelineLoading && h('div', { style: { padding: 40, textAlign: 'center' } }, h(Spinner), ' Loading timeline…'),
+          !damageTimelineLoading && damageTimeline.length === 0 && h('div', { className: 'empty-state', style: { minHeight: 180 } }, 'No voltage data for this SCB in the selected range.'),
           !damageTimelineLoading && damageTimeline.length > 0 && (() => {
-            const ts = damageTimeline.map((d) => String(d.timestamp || '').replace('T', ' ').slice(5, 16));
+            const ts = damageTimeline.map((d) => {
+              const s = String(d.timestamp || '').replace('T', ' ');
+              // Use month-day hour:min format so multi-day x-axis is readable
+              return s.slice(5, 16);
+            });
             const refV = damageTimeline.map((d) => d.reference_v ?? null);
             const scbV = damageTimeline.map((d) => d.voltage_v ?? null);
             const pctDev = damageTimeline.map((d) => d.pct_dev ?? 0);
@@ -2123,9 +2136,10 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
                 backgroundColor: 'transparent',
                 tooltip: {
                   trigger: 'axis',
-                  backgroundColor: '#0f172a',
-                  borderColor: '#1e293b',
-                  textStyle: { color: '#f8fafc', fontSize: 12 },
+                  confine: true,
+                  backgroundColor: 'var(--panel)',
+                  borderColor: 'var(--line)',
+                  textStyle: { color: 'var(--text)', fontSize: 12 },
                   formatter: (params) => {
                     const label = params[0]?.axisValue || '';
                     let html = `<div style="font-weight:600;margin-bottom:4px">${label}</div>`;
@@ -2144,14 +2158,14 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
                     return html;
                   },
                 },
-                legend: { data: ['Reference V', 'SCB Voltage'], bottom: 42, textStyle: { color: '#94a3b8', fontSize: 12 }, icon: 'roundRect' },
-                grid: { top: 20, right: 20, left: 55, bottom: 80 },
-                toolbox: { right: 8, top: 4, feature: { dataZoom: { yAxisIndex: 'none', icon: { zoom: 'path://M10,10L40,10L40,40L10,40Z', back: 'path://M10,10L40,10L40,40L10,40Z' } }, restore: {}, saveAsImage: {} }, iconStyle: { borderColor: '#475569' } },
-                dataZoom: [{ type: 'inside', xAxisIndex: 0 }, { type: 'slider', xAxisIndex: 0, height: 20, bottom: 16, borderColor: '#1e293b', fillerColor: 'rgba(59,130,246,0.1)', handleStyle: { color: '#3b82f6' } }],
-                xAxis: { type: 'category', data: ts, axisLabel: { color: '#94a3b8', fontSize: 10, rotate: 20 }, axisLine: { lineStyle: { color: '#1e293b' } }, axisTick: { show: false } },
+                legend: { data: ['Reference V', 'SCB Voltage'], bottom: 42, textStyle: { color: '#64748b', fontSize: 12 }, icon: 'roundRect' },
+                grid: { top: 20, right: 60, left: 55, bottom: 80 },
+                toolbox: { right: 8, top: 4, feature: { dataZoom: { yAxisIndex: 'none' }, restore: {}, saveAsImage: {} }, iconStyle: { borderColor: '#94a3b8' } },
+                dataZoom: [{ type: 'inside', xAxisIndex: 0 }, { type: 'slider', xAxisIndex: 0, height: 20, bottom: 16 }],
+                xAxis: { type: 'category', data: ts, axisLabel: { color: '#64748b', fontSize: 10, rotate: 20 }, axisLine: { lineStyle: { color: '#e2e8f0' } }, axisTick: { show: false } },
                 yAxis: [
-                  { name: 'Voltage (V)', type: 'value', axisLabel: { color: '#94a3b8', fontSize: 10 }, splitLine: { lineStyle: { type: 'dashed', color: '#1e293b' } }, nameTextStyle: { color: '#94a3b8', fontSize: 10 } },
-                  { name: 'Dev %', type: 'value', position: 'right', min: 0, max: 35, axisLabel: { color: '#94a3b8', fontSize: 10, formatter: (v) => `${v}%` }, splitLine: { show: false }, nameTextStyle: { color: '#94a3b8', fontSize: 10 } },
+                  { name: 'Voltage (V)', type: 'value', axisLabel: { color: '#64748b', fontSize: 10 }, splitLine: { lineStyle: { type: 'dashed', color: '#e2e8f0' } }, nameTextStyle: { color: '#64748b', fontSize: 10 } },
+                  { name: 'Dev %', type: 'value', position: 'right', min: 0, max: 35, axisLabel: { color: '#64748b', fontSize: 10, formatter: (v) => `${v}%` }, splitLine: { show: false }, nameTextStyle: { color: '#64748b', fontSize: 10 } },
                 ],
                 series: [
                   {

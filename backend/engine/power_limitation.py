@@ -201,10 +201,15 @@ def run_power_limitation(
     df["state"] = cond_irr & cond_dev & cond_power
     df["trigger"] = cond_drop
 
-    df["run_id"] = (df["state"] != df["state"].shift(1)).cumsum()
+    # Per-inverter run IDs (global shift() mixes inverter rows and produces size-1 runs).
+    df["run_id"] = (
+        df.groupby("inverter_id")["state"]
+        .apply(lambda s: (s != s.shift()).cumsum())
+        .reset_index(level=0, drop=True)
+    )
 
     limited_indices = set()
-    for run_id, g in df[df["state"]].groupby("run_id"):
+    for (inv_id, run_id), g in df[df["state"]].groupby(["inverter_id", "run_id"]):
         if g.empty:
             continue
 
@@ -217,7 +222,7 @@ def run_power_limitation(
 
         start_idx = g.index[0]
         lookback = df.loc[max(0, start_idx - 5) : start_idx]
-        lookback = lookback[lookback["inverter_id"] == g.iloc[0]["inverter_id"]]
+        lookback = lookback[lookback["inverter_id"] == inv_id]
         has_trigger = lookback["trigger"].any()
 
         if valid_duration and has_trigger:

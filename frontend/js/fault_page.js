@@ -1241,8 +1241,7 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
         h(DataTable, {
           columns: [
             { key: 'inverter_id', label: 'Inverter', render: (row) => h('strong', null, row.inverter_id), csvValue: (row) => row.inverter_id },
-            { key: 'shutdown_points', label: 'Shutdown Points', sortValue: (row) => row.shutdown_points ?? -Infinity, render: (row) => Number(row.shutdown_points || 0), csvValue: (row) => Number(row.shutdown_points || 0) },
-            { key: 'shutdown_hours', label: 'Shutdown Hours', sortValue: (row) => row.shutdown_hours ?? -Infinity, render: (row) => Number(row.shutdown_hours || 0).toFixed(3), csvValue: (row) => Number(row.shutdown_hours || 0).toFixed(3) },
+            { key: 'shutdown_hours', label: 'Shutdown Hours', sortValue: (row) => row.shutdown_hours ?? -Infinity, render: (row) => Number(row.shutdown_hours || 0).toFixed(2), csvValue: (row) => Number(row.shutdown_hours || 0).toFixed(3) },
             { key: 'total_shutdown_energy_loss_kwh', label: 'Energy loss (kWh)', sortValue: (row) => row.total_shutdown_energy_loss_kwh ?? -Infinity, render: (row) => Number(row.total_shutdown_energy_loss_kwh || 0).toFixed(2), csvValue: (row) => Number(row.total_shutdown_energy_loss_kwh || 0).toFixed(2) },
             { key: 'last_seen_shutdown', label: 'Last Seen', csvValue: (row) => row.last_seen_shutdown || '' },
             { key: 'investigation_window', label: 'Investigation Window', render: (row) => {
@@ -1279,8 +1278,7 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
         h(DataTable, {
           columns: [
             { key: 'event_id', label: 'Event', render: (row) => h('strong', null, row.event_id), csvValue: (row) => row.event_id },
-            { key: 'breakdown_points', label: 'Breakdown Points', sortValue: (row) => row.breakdown_points ?? -Infinity, render: (row) => Number(row.breakdown_points || 0), csvValue: (row) => Number(row.breakdown_points || 0) },
-            { key: 'breakdown_hours', label: 'Breakdown Hours', sortValue: (row) => row.breakdown_hours ?? -Infinity, render: (row) => Number(row.breakdown_hours || 0).toFixed(3), csvValue: (row) => Number(row.breakdown_hours || 0).toFixed(3) },
+            { key: 'breakdown_hours', label: 'Breakdown Hours', sortValue: (row) => row.breakdown_hours ?? -Infinity, render: (row) => Number(row.breakdown_hours || 0).toFixed(2), csvValue: (row) => Number(row.breakdown_hours || 0).toFixed(3) },
             { key: 'total_grid_breakdown_energy_loss_kwh', label: 'Energy loss (kWh)', sortValue: (row) => row.total_grid_breakdown_energy_loss_kwh ?? -Infinity, render: (row) => Number(row.total_grid_breakdown_energy_loss_kwh || 0).toFixed(2), csvValue: (row) => Number(row.total_grid_breakdown_energy_loss_kwh || 0).toFixed(2) },
             { key: 'last_seen_breakdown', label: 'Last Seen', csvValue: (row) => row.last_seen_breakdown || '' },
             { key: 'investigation_window', label: 'Investigation Window', render: (row) => {
@@ -1395,16 +1393,17 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
       const clipCols = [
         { key: 'inverter_id', label: 'Inverter', render: (row) => h('strong', null, row.inverter_id), csvValue: (row) => row.inverter_id },
         { key: 'rated_ac_kw', label: 'Rated (kW)', sortValue: (row) => row.rated_ac_kw ?? -Infinity, render: (row) => Number(row.rated_ac_kw || 0).toFixed(1), csvValue: (row) => Number(row.rated_ac_kw || 0).toFixed(2) },
-        { key: 'k_factor', label: 'k (kW · W⁻¹·m²)', sortValue: (row) => row.k_factor ?? -Infinity, render: (row) => Number(row.k_factor || 0).toFixed(4), csvValue: (row) => Number(row.k_factor || 0).toFixed(4) },
-        { key: 'coverage_pct', label: 'Coverage %', sortValue: (row) => row.coverage_pct ?? -Infinity, render: (row) => Number(row.coverage_pct || 0).toFixed(1), csvValue: (row) => Number(row.coverage_pct || 0).toFixed(1) },
+        { key: 'dominant_kind', label: 'Shape', render: (row) => h('span', { style: { padding: '2px 8px', borderRadius: 12, fontSize: 11, fontWeight: 600, background: CD_KIND_COLOR[row.dominant_kind] || '#334155', color: '#fff' } }, CD_KIND_LABELS[row.dominant_kind] || row.dominant_kind), csvValue: (row) => CD_KIND_LABELS[row.dominant_kind] || row.dominant_kind },
         { key: 'loss_power_clipping_kwh', label: 'Power Clip (kWh)', sortValue: (row) => row.loss_power_clipping_kwh ?? -Infinity, render: (row) => Number(row.loss_power_clipping_kwh || 0).toFixed(2), csvValue: (row) => Number(row.loss_power_clipping_kwh || 0).toFixed(2) },
         { key: 'loss_current_clipping_kwh', label: 'Current Clip (kWh)', sortValue: (row) => row.loss_current_clipping_kwh ?? -Infinity, render: (row) => Number(row.loss_current_clipping_kwh || 0).toFixed(2), csvValue: (row) => Number(row.loss_current_clipping_kwh || 0).toFixed(2) },
         { key: 'total_energy_loss_kwh', label: 'Total Loss (kWh)', sortValue: (row) => row.total_energy_loss_kwh ?? -Infinity, render: (row) => h('strong', null, Number(row.total_energy_loss_kwh || 0).toFixed(2)), csvValue: (row) => Number(row.total_energy_loss_kwh || 0).toFixed(2) },
-        { key: 'investigation_window', label: 'Window', render: (row) => {
+        { key: 'investigation_window', label: 'Fault Window', render: (row) => {
           const s = row.investigation_window_start || '';
           const e = row.investigation_window_end || '';
-          return s && e ? `${String(s).slice(0, 16)} → ${String(e).slice(0, 16)}` : (s || e || '—');
-        }, csvValue: (row) => `${row.investigation_window_start || ''} - ${row.investigation_window_end || ''}` },
+          if (!s && !e) return '—';
+          const fmt = (v) => String(v).replace('T', ' ').slice(5, 16);
+          return h('span', { style: { fontSize: 12, whiteSpace: 'nowrap' } }, s && e ? `${fmt(s)} – ${fmt(e)}` : fmt(s || e));
+        }, csvValue: (row) => `${row.investigation_window_start || ''} – ${row.investigation_window_end || ''}` },
         { key: 'action', label: 'Investigate', sortable: false, render: (row) => h('button', {
           className: 'btn btn-primary', style: { padding: '4px 8px', fontSize: 12 },
           onClick: () => { setSelectedCdKind('clip'); setSelectedCdInverter(row.inverter_id); },
@@ -1414,17 +1413,17 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
       const derateCols = [
         { key: 'inverter_id', label: 'Inverter', render: (row) => h('strong', null, row.inverter_id), csvValue: (row) => row.inverter_id },
         { key: 'rated_ac_kw', label: 'Rated (kW)', sortValue: (row) => row.rated_ac_kw ?? -Infinity, render: (row) => Number(row.rated_ac_kw || 0).toFixed(1), csvValue: (row) => Number(row.rated_ac_kw || 0).toFixed(2) },
-        { key: 'k_factor', label: 'k (kW · W⁻¹·m²)', sortValue: (row) => row.k_factor ?? -Infinity, render: (row) => Number(row.k_factor || 0).toFixed(4), csvValue: (row) => Number(row.k_factor || 0).toFixed(4) },
-        { key: 'coverage_pct', label: 'Coverage %', sortValue: (row) => row.coverage_pct ?? -Infinity, render: (row) => Number(row.coverage_pct || 0).toFixed(1), csvValue: (row) => Number(row.coverage_pct || 0).toFixed(1) },
         { key: 'dominant_kind', label: 'Shape', render: (row) => h('span', { style: { padding: '2px 8px', borderRadius: 12, fontSize: 11, fontWeight: 600, background: CD_KIND_COLOR[row.dominant_kind] || '#334155', color: '#fff' } }, CD_KIND_LABELS[row.dominant_kind] || row.dominant_kind), csvValue: (row) => CD_KIND_LABELS[row.dominant_kind] || row.dominant_kind },
         { key: 'loss_static_derating_kwh', label: 'Static (kWh)', sortValue: (row) => row.loss_static_derating_kwh ?? -Infinity, render: (row) => Number(row.loss_static_derating_kwh || 0).toFixed(2), csvValue: (row) => Number(row.loss_static_derating_kwh || 0).toFixed(2) },
         { key: 'loss_dynamic_derating_kwh', label: 'Dynamic (kWh)', sortValue: (row) => row.loss_dynamic_derating_kwh ?? -Infinity, render: (row) => Number(row.loss_dynamic_derating_kwh || 0).toFixed(2), csvValue: (row) => Number(row.loss_dynamic_derating_kwh || 0).toFixed(2) },
         { key: 'total_energy_loss_kwh', label: 'Total Loss (kWh)', sortValue: (row) => row.total_energy_loss_kwh ?? -Infinity, render: (row) => h('strong', null, Number(row.total_energy_loss_kwh || 0).toFixed(2)), csvValue: (row) => Number(row.total_energy_loss_kwh || 0).toFixed(2) },
-        { key: 'investigation_window', label: 'Window', render: (row) => {
+        { key: 'investigation_window', label: 'Fault Window', render: (row) => {
           const s = row.investigation_window_start || '';
           const e = row.investigation_window_end || '';
-          return s && e ? `${String(s).slice(0, 16)} → ${String(e).slice(0, 16)}` : (s || e || '—');
-        }, csvValue: (row) => `${row.investigation_window_start || ''} - ${row.investigation_window_end || ''}` },
+          if (!s && !e) return '—';
+          const fmt = (v) => String(v).replace('T', ' ').slice(5, 16);
+          return h('span', { style: { fontSize: 12, whiteSpace: 'nowrap' } }, s && e ? `${fmt(s)} – ${fmt(e)}` : fmt(s || e));
+        }, csvValue: (row) => `${row.investigation_window_start || ''} – ${row.investigation_window_end || ''}` },
         { key: 'action', label: 'Investigate', sortable: false, render: (row) => h('button', {
           className: 'btn btn-primary', style: { padding: '4px 8px', fontSize: 12 },
           onClick: () => { setSelectedCdKind('derate'); setSelectedCdInverter(row.inverter_id); },
@@ -1554,15 +1553,20 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
                 backgroundColor: 'transparent',
                 tooltip: {
                   trigger: 'axis',
-                  backgroundColor: 'var(--surface, #0f172a)',
-                  borderColor: 'var(--border, #1e293b)',
-                  textStyle: { color: 'var(--text, #e2e8f0)', fontSize: 12 },
-                  axisPointer: { type: 'cross' },
+                  confine: true,
+                  backgroundColor: '#0f172a',
+                  borderColor: '#1e293b',
+                  textStyle: { color: '#f8fafc', fontSize: 12 },
+                  axisPointer: { type: 'line', lineStyle: { type: 'dashed', color: '#475569' } },
                   formatter: (params) => {
                     if (!params || !params.length) return '';
-                    const head = params[0].axisValue || '';
-                    const lines = params.map((p) => `${p.marker} ${p.seriesName}: <b>${Number(p.value).toFixed(2)}</b>`);
-                    return `${head}<br/>${lines.join('<br/>')}`;
+                    const head = `<div style="font-weight:600;margin-bottom:4px">${params[0].axisValue || ''}</div>`;
+                    const lines = params.map((p) => {
+                      const val = p.value == null ? '—' : Number(p.value).toFixed(2);
+                      const unit = p.seriesName.includes('GTI') || p.seriesName.includes('W/m²') ? ' W/m²' : ' kW';
+                      return `<div>${p.marker} ${p.seriesName}: <b>${val}${unit}</b></div>`;
+                    });
+                    return head + lines.join('');
                   },
                 },
                 legend: { bottom: 0, data: legendNames, textStyle: { color: 'var(--text-soft, #94a3b8)', fontSize: 12 } },
@@ -2003,29 +2007,59 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
 
     subView === 'damage' && h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16 } },
       damageLoading && h('div', { style: { padding: 24, textAlign: 'center', color: 'var(--text-soft)' } }, h(Spinner), ' Loading damage diagnostics…'),
-      !damageLoading && h('div', { className: 'kpi-grid', style: { gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' } },
-        h(KpiCard, { label: 'Bypass diode (SCBs)', value: damageSummary ? (damageSummary.active_bypass_scbs ?? '—') : '—', unit: '', color: '#f97316' }),
-        h(KpiCard, { label: 'Module damage (SCBs)', value: damageSummary ? (damageSummary.active_damage_scbs ?? '—') : '—', unit: '', color: '#dc2626' }),
-        h(KpiCard, { label: 'Energy impact', value: damageSummary && damageSummary.loss_total_kwh != null ? (damageSummary.loss_total_kwh / 1000).toFixed(3) : '—', unit: 'MWh', color: '#8b5cf6' }),
+      !damageLoading && h(Card, { title: 'Bypass Diode / Module Damage Insights' },
+        h('div', { className: 'kpi-grid', style: { gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' } },
+          h(KpiCard, { label: 'Bypass Diode SCBs', value: damageSummary ? (damageSummary.active_bypass_scbs ?? 0) : '—', unit: '', color: '#f97316' }),
+          h(KpiCard, { label: 'Module Damage SCBs', value: damageSummary ? (damageSummary.active_damage_scbs ?? 0) : '—', unit: '', color: '#dc2626' }),
+          h(KpiCard, { label: 'Bypass Diode Loss', value: damageSummary && damageSummary.loss_bypass_kwh != null ? Number(damageSummary.loss_bypass_kwh).toFixed(1) : '—', unit: 'kWh', color: '#f97316' }),
+          h(KpiCard, { label: 'Module Damage Loss', value: damageSummary && damageSummary.loss_damage_kwh != null ? Number(damageSummary.loss_damage_kwh).toFixed(1) : '—', unit: 'kWh', color: '#dc2626' }),
+          h(KpiCard, { label: 'Total Energy Loss', value: damageSummary && damageSummary.loss_total_kwh != null ? Number(damageSummary.loss_total_kwh).toFixed(1) : '—', unit: 'kWh', color: '#8b5cf6' }),
+        ),
       ),
-      !damageLoading && h(Card, { title: `SCB voltage faults (${damageRows.length})` },
+      !damageLoading && h(Card, { title: `Per-SCB Voltage Fault Detail (${damageRows.length})` },
         h(DataTable, {
           columns: [
-            { key: 'scb_id', label: 'SCB', sortValue: (r) => r.scb_id || '' },
-            { key: 'inverter_id', label: 'Inverter', sortValue: (r) => r.inverter_id || '' },
-            { key: 'fault_kind', label: 'Kind', render: (r) => String(r.fault_kind || '').replace(/_/g, ' ') },
-            { key: 'module_equiv', label: 'Module eq.', sortValue: (r) => r.module_equiv ?? 0 },
-            { key: 'total_energy_loss_kwh', label: 'Loss (kWh)', sortValue: (r) => r.total_energy_loss_kwh ?? 0 },
+            { key: 'scb_id', label: 'SCB', render: (r) => h('strong', null, r.scb_id || '—'), csvValue: (r) => r.scb_id || '' },
+            { key: 'inverter_id', label: 'Inverter', csvValue: (r) => r.inverter_id || '' },
             {
-              key: 'action',
-              label: 'Investigate',
-              sortable: false,
+              key: 'fault_kind', label: 'Classification',
+              render: (r) => {
+                const kind = r.fault_kind || '';
+                const isBypass = kind === 'bypass_diode';
+                return h('span', {
+                  style: { padding: '2px 9px', borderRadius: 12, fontSize: 11, fontWeight: 600,
+                    background: isBypass ? '#f59e0b' : '#ef4444', color: '#fff' }
+                }, isBypass ? 'Bypass Diode' : 'Module Damage');
+              },
+              csvValue: (r) => (r.fault_kind || '').replace(/_/g, ' '),
+            },
+            {
+              key: 'voltage_drop_pct', label: 'V Drop %', sortValue: (r) => r.voltage_drop_pct ?? 0,
+              render: (r) => r.voltage_drop_pct != null ? `${Number(r.voltage_drop_pct).toFixed(1)} %` : '—',
+              csvValue: (r) => r.voltage_drop_pct != null ? Number(r.voltage_drop_pct).toFixed(2) : '',
+            },
+            {
+              key: 'total_energy_loss_kwh', label: 'Energy Loss (kWh)', sortValue: (r) => r.total_energy_loss_kwh ?? 0,
+              render: (r) => h('strong', null, Number(r.total_energy_loss_kwh || 0).toFixed(2)),
+              csvValue: (r) => Number(r.total_energy_loss_kwh || 0).toFixed(3),
+            },
+            {
+              key: 'investigation_window', label: 'Fault Window',
+              render: (r) => {
+                const s = r.investigation_window_start || '';
+                const e = r.investigation_window_end || '';
+                if (!s && !e) return '—';
+                const fmt = (v) => String(v).replace('T', ' ').slice(5, 16);
+                return h('span', { style: { fontSize: 12, whiteSpace: 'nowrap' } }, s && e ? `${fmt(s)} – ${fmt(e)}` : fmt(s || e));
+              },
+              csvValue: (r) => `${r.investigation_window_start || ''} – ${r.investigation_window_end || ''}`,
+            },
+            {
+              key: 'action', label: 'Investigate', sortable: false,
               render: (r) => h('button', {
-                type: 'button',
-                className: 'btn btn-primary',
-                style: { padding: '4px 8px', fontSize: 12 },
+                type: 'button', className: 'btn btn-primary', style: { padding: '4px 8px', fontSize: 12 },
                 onClick: () => setSelectedDamageScb(r.scb_id),
-              }, 'Chart'),
+              }, 'Investigate'),
             },
           ],
           rows: damageRows,
@@ -2033,6 +2067,7 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
           maxHeight: 420,
           initialSortKey: 'total_energy_loss_kwh',
           initialSortDir: 'desc',
+          filename: `damage_${plantId || 'plant'}_${dateFrom}_${dateTo}.csv`,
         }),
       ),
     ),
@@ -2044,32 +2079,111 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
       },
         h('div', {
           onClick: (e) => e.stopPropagation(),
-          style: { background: 'var(--surface, #0f172a)', border: '1px solid var(--border, #1e293b)', borderRadius: 14, width: 'min(960px, 96vw)', maxHeight: '92vh', overflow: 'auto', padding: 20 },
+          style: { background: 'var(--surface, #0f172a)', border: '1px solid var(--border, #1e293b)', borderRadius: 14, width: 'min(1100px, 96vw)', maxHeight: '92vh', overflow: 'auto', padding: 20, boxShadow: '0 30px 60px rgba(0,0,0,0.5)' },
         },
-          h('div', { style: { display: 'flex', justifyContent: 'space-between', marginBottom: 12 } },
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 } },
             h('div', null,
-              h('div', { style: { fontSize: 18, fontWeight: 700 } }, `Investigate · ${selectedDamageScb}`),
-              h('div', { style: { fontSize: 12, color: 'var(--text-soft)', marginTop: 4 } }, 'SCB voltage vs plant reference (top-quartile inverter medians)'),
+              h('div', { style: { fontSize: 18, fontWeight: 700, color: 'var(--text, #e2e8f0)' } }, `Investigate · ${selectedDamageScb}`),
+              h('div', { style: { fontSize: 12, color: 'var(--text-soft, #94a3b8)', marginTop: 2 } }, 'SCB voltage vs plant reference  ·  Fault bands: orange = bypass diode (3–8% drop), red = module damage (8–30% drop)'),
             ),
-            h('button', { className: 'btn', onClick: () => setSelectedDamageScb(null) }, '✕ Close'),
+            h('button', { className: 'btn', onClick: () => setSelectedDamageScb(null), style: { padding: '6px 12px' } }, '✕ Close'),
           ),
-          damageTimelineLoading && h('div', { style: { padding: 40, textAlign: 'center' } }, h(Spinner)),
-          !damageTimelineLoading && damageTimeline.length > 0 && h(window.EChart, {
-            style: { width: '100%', height: 400 },
-            option: {
-              backgroundColor: 'transparent',
-              tooltip: { trigger: 'axis', backgroundColor: 'var(--surface)', borderColor: 'var(--border)', textStyle: { color: 'var(--text)' } },
-              legend: { bottom: 0, textStyle: { color: 'var(--text-soft)' } },
-              dataZoom: [{ type: 'inside' }, { type: 'slider', height: 18, bottom: 24 }],
-              toolbox: { feature: { restore: {}, dataZoom: {} } },
-              xAxis: { type: 'category', data: damageTimeline.map((d) => String(d.timestamp || '').slice(5, 16)), axisLabel: { color: 'var(--text-soft)' } },
-              yAxis: { name: 'V', type: 'value', axisLabel: { color: 'var(--text-soft)' }, splitLine: { lineStyle: { type: 'dashed', color: 'var(--border)' } } },
-              series: [
-                { name: 'Reference V', type: 'line', data: damageTimeline.map((d) => d.reference_v), lineStyle: { type: 'dashed', color: '#10b981' }, symbol: 'none' },
-                { name: 'SCB V', type: 'line', data: damageTimeline.map((d) => d.voltage_v), lineStyle: { color: '#3b82f6' }, symbol: 'none' },
-              ],
-            },
-          }),
+          damageTimelineLoading && h('div', { style: { padding: 40, textAlign: 'center', color: 'var(--text-soft)' } }, h(Spinner), ' Loading timeline…'),
+          !damageTimelineLoading && damageTimeline.length === 0 && h('div', { style: { padding: 40, textAlign: 'center', color: 'var(--text-soft)' } }, 'No voltage data for this SCB in the selected range.'),
+          !damageTimelineLoading && damageTimeline.length > 0 && (() => {
+            const ts = damageTimeline.map((d) => String(d.timestamp || '').replace('T', ' ').slice(5, 16));
+            const refV = damageTimeline.map((d) => d.reference_v ?? null);
+            const scbV = damageTimeline.map((d) => d.voltage_v ?? null);
+            const pctDev = damageTimeline.map((d) => d.pct_dev ?? 0);
+            const faultKind = damageTimeline.map((d) => d.fault_kind || 'normal');
+
+            // Build markArea for fault windows (contiguous fault ranges)
+            const faultBands = [];
+            let bandStart = null;
+            let bandKind = null;
+            damageTimeline.forEach((d, i) => {
+              const k = d.fault_kind || 'normal';
+              if (k !== 'normal') {
+                if (bandStart === null) { bandStart = i; bandKind = k; }
+              } else if (bandStart !== null) {
+                faultBands.push({ startIdx: bandStart, endIdx: i - 1, kind: bandKind });
+                bandStart = null; bandKind = null;
+              }
+            });
+            if (bandStart !== null) faultBands.push({ startIdx: bandStart, endIdx: damageTimeline.length - 1, kind: bandKind });
+
+            const markAreas = faultBands.map((b) => [
+              { xAxis: ts[b.startIdx], itemStyle: { color: b.kind === 'bypass_diode' ? 'rgba(245,158,11,0.18)' : 'rgba(239,68,68,0.18)' } },
+              { xAxis: ts[b.endIdx] },
+            ]);
+
+            return h(window.EChart, {
+              style: { width: '100%', height: 440 },
+              option: {
+                backgroundColor: 'transparent',
+                tooltip: {
+                  trigger: 'axis',
+                  backgroundColor: '#0f172a',
+                  borderColor: '#1e293b',
+                  textStyle: { color: '#f8fafc', fontSize: 12 },
+                  formatter: (params) => {
+                    const label = params[0]?.axisValue || '';
+                    let html = `<div style="font-weight:600;margin-bottom:4px">${label}</div>`;
+                    const idx = ts.indexOf(label);
+                    if (idx >= 0) {
+                      const kind = faultKind[idx];
+                      const kLabel = kind === 'bypass_diode' ? '<span style="color:#f59e0b">Bypass Diode</span>'
+                                   : kind === 'module_damage' ? '<span style="color:#ef4444">Module Damage</span>'
+                                   : '<span style="color:#6ee7b7">Normal</span>';
+                      html += `<div>Status: ${kLabel}</div>`;
+                      html += `<div>Deviation: <b>${pctDev[idx]?.toFixed(2) ?? '—'} %</b></div>`;
+                    }
+                    params.forEach((p) => {
+                      html += `<div>${p.marker}${p.seriesName}: <b>${p.value ?? '—'} V</b></div>`;
+                    });
+                    return html;
+                  },
+                },
+                legend: { data: ['Reference V', 'SCB Voltage'], bottom: 42, textStyle: { color: '#94a3b8', fontSize: 12 }, icon: 'roundRect' },
+                grid: { top: 20, right: 20, left: 55, bottom: 80 },
+                toolbox: { right: 8, top: 4, feature: { dataZoom: { yAxisIndex: 'none', icon: { zoom: 'path://M10,10L40,10L40,40L10,40Z', back: 'path://M10,10L40,10L40,40L10,40Z' } }, restore: {}, saveAsImage: {} }, iconStyle: { borderColor: '#475569' } },
+                dataZoom: [{ type: 'inside', xAxisIndex: 0 }, { type: 'slider', xAxisIndex: 0, height: 20, bottom: 16, borderColor: '#1e293b', fillerColor: 'rgba(59,130,246,0.1)', handleStyle: { color: '#3b82f6' } }],
+                xAxis: { type: 'category', data: ts, axisLabel: { color: '#94a3b8', fontSize: 10, rotate: 20 }, axisLine: { lineStyle: { color: '#1e293b' } }, axisTick: { show: false } },
+                yAxis: [
+                  { name: 'Voltage (V)', type: 'value', axisLabel: { color: '#94a3b8', fontSize: 10 }, splitLine: { lineStyle: { type: 'dashed', color: '#1e293b' } }, nameTextStyle: { color: '#94a3b8', fontSize: 10 } },
+                  { name: 'Dev %', type: 'value', position: 'right', min: 0, max: 35, axisLabel: { color: '#94a3b8', fontSize: 10, formatter: (v) => `${v}%` }, splitLine: { show: false }, nameTextStyle: { color: '#94a3b8', fontSize: 10 } },
+                ],
+                series: [
+                  {
+                    name: 'Reference V', type: 'line', yAxisIndex: 0,
+                    data: refV,
+                    lineStyle: { type: 'dashed', color: '#10b981', width: 2 },
+                    symbol: 'none', smooth: false,
+                  },
+                  {
+                    name: 'SCB Voltage', type: 'line', yAxisIndex: 0,
+                    data: scbV,
+                    lineStyle: { color: '#3b82f6', width: 2 },
+                    symbol: 'none', smooth: false,
+                    markArea: { silent: true, data: markAreas },
+                  },
+                  {
+                    name: 'Deviation %', type: 'bar', yAxisIndex: 1,
+                    data: pctDev,
+                    itemStyle: {
+                      color: (params) => {
+                        const k = faultKind[params.dataIndex] || 'normal';
+                        return k === 'bypass_diode' ? '#f59e0b' : k === 'module_damage' ? '#ef4444' : 'rgba(100,116,139,0.35)';
+                      },
+                    },
+                    barWidth: '60%',
+                    z: 1,
+                    tooltip: { show: false },
+                  },
+                ],
+              },
+            });
+          })(),
         ),
       ),
       document.body,

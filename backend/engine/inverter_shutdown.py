@@ -210,17 +210,19 @@ def run_inverter_shutdown(
         df["expected_ac_kw"],
     )
 
-    # Per-inverter Δt (hours) to the *next* sample (forward interval), capped like grid breakdown.
-    max_dt_h = float(os.getenv("IS_MAX_DT_HOURS", str(5.0 / 60.0)))
+    # Per-inverter Δt (hours) to the *next* sample — cap at 2× the dataset median cadence so
+    # 15-min data isn't incorrectly capped by the 1-min default.
+    _env_cap = float(os.getenv("IS_MAX_DT_HOURS", "0"))
 
     def _forward_dt(series: pd.Series) -> pd.Series:
         ts = pd.to_datetime(series, errors="coerce")
         dt = ts.shift(-1).sub(ts).dt.total_seconds() / 3600.0
-        valid = dt[(dt > 0) & (dt <= 6.0)]
+        valid = dt[(dt > 0) & (dt <= 2.0)]
         median = float(valid.median()) if not valid.empty else (15.0 / 60.0)
         if not np.isfinite(median) or median <= 0:
             median = 15.0 / 60.0
-        return dt.fillna(median).clip(lower=1.0 / 3600.0, upper=max_dt_h)
+        cap = _env_cap if _env_cap > 0 else max(2.0 * median, 1.0 / 60.0)
+        return dt.fillna(median).clip(lower=1.0 / 3600.0, upper=cap)
 
     df["dt_h"] = df.groupby("inverter_id", sort=False)["timestamp"].transform(_forward_dt)
 

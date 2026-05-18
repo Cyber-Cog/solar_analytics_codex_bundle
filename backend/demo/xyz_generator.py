@@ -198,13 +198,16 @@ def _pl_limit_factor(hm: int) -> float:
 
 
 def _derate_factor(hm: int) -> float:
-    """Shallow static derate bowl — not shutdown-like."""
-    if hm < 10 * 60 or hm > 15 * 60:
+    """Pronounced U-shaped (cup) static derate in midday — normal morning & evening."""
+    start_hm = 10 * 60 + 30
+    end_hm = 15 * 60 + 30
+    if hm < start_hm or hm > end_hm:
         return 1.0
-    mid = 12 * 60 + 30
-    half = 2.5 * 60
+    mid = (start_hm + end_hm) / 2.0
+    half = (end_hm - start_hm) / 2.0
     x = (hm - mid) / half
-    return 0.90 + 0.04 * (x * x)
+    # Deepest at midday (0.73), recovers to ~0.88 at window edges
+    return float(0.73 + 0.15 * x * x)
 
 
 def _soiling_cpr_factor(day: str, scb: str, day_index: int, d0s: str) -> float:
@@ -220,13 +223,16 @@ def _soiling_cpr_factor(day: str, scb: str, day_index: int, d0s: str) -> float:
 
 
 def _scb_voltage_v(scb: str, day: str, hm: int, rng: np.random.Generator) -> float:
-    v = DC_VOLTAGE_V + rng.normal(0.0, 0.45)
-    modules_total = STRINGS_PER_SCB * MODULES_PER_STRING
-    v_per_module = DC_VOLTAGE_V / modules_total
+    """Generate SCB DC voltage.  Fault deviations are expressed as % of reference
+    so they are clearly visible in the investigate chart.
+    Bypass diode: ~5% V drop on BYPASS_SCB.
+    Module damage: ~11% V drop on MODULE_DAMAGE_SCB.
+    """
+    v = DC_VOLTAGE_V + rng.normal(0.0, 0.15)
     if scb == BYPASS_SCB and day == BYPASS_DAY and 9 * 60 <= hm <= 16 * 60:
-        v -= 0.33 * v_per_module
+        v = DC_VOLTAGE_V * 0.95 + rng.normal(0.0, 0.10)
     if scb == MODULE_DAMAGE_SCB and day == MODULE_DAMAGE_DAY and 9 * 60 <= hm <= 16 * 60:
-        v -= 1.25 * v_per_module
+        v = DC_VOLTAGE_V * 0.89 + rng.normal(0.0, 0.10)
     return float(v)
 
 

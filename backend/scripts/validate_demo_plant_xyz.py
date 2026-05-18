@@ -196,7 +196,7 @@ def main() -> int:
 
         gb_tab = _gb_tab_with_cache(db, cfg.plant_id, d0, d1)
         gb_h = float((gb_tab.get("summary") or {}).get("total_grid_breakdown_hours") or 0)
-        op_h = _range_operating_hours(d0, d1)
+        op_h = _range_operating_hours(db, cfg.plant_id, d0, d1)
         if op_h > 0:
             notes.append(f"grid availability basis: {gb_h:.2f}h GB / {op_h:.0f}h operating")
         if totals.get("plant_availability_pct") is None:

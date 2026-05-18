@@ -61,33 +61,74 @@ router = APIRouter(prefix="/api/faults", tags=["Faults"])
 DS_SUMMARY_PAYLOAD_VERSION = 9
 # Bump when unified-feed category semantics change (e.g. IS energy/count) so DB
 # unified_fault_snapshot rows are not served stale for exact date_from/date_to keys.
-UNIFIED_FAULT_PAYLOAD_VERSION = 14
-GB_TAB_PAYLOAD_VERSION = 2
+UNIFIED_FAULT_PAYLOAD_VERSION = 15
+GB_TAB_PAYLOAD_VERSION = 3
 # Bump when IS tab JSON semantics change (e.g. irradiance join) so DB snapshots recompute.
-IS_TAB_PAYLOAD_VERSION = 2
+IS_TAB_PAYLOAD_VERSION = 3
 # Bump when CD tab JSON semantics change (e.g. GTI merge_asof) so DB snapshots recompute.
 CD_TAB_PAYLOAD_VERSION = 3
 DS_MIN_CONFIRMED_POINTS = int(os.getenv("DS_MIN_CONFIRMED_POINTS", "3"))
 
 _MEM_PL_PAGE = "faults_pl_page_v2"
-_MEM_IS_TAB = "faults_is_tab_v9_irr_asof_unified_v13"
-_MEM_GB_TAB = "faults_gb_tab_v4_pr_loss"
+_MEM_IS_TAB = "faults_is_tab_v10_cadence_aware_dt"
+_MEM_GB_TAB = "faults_gb_tab_v5_no_pts_col"
 _MEM_COMM_TAB = "faults_comm_tab_v2"
 _MEM_INV_EFF_AGG = "faults_inv_eff_agg_v4"
 _MEM_CD_TAB = "faults_cd_tab_v4_irr_asof"
-_MEM_DAMAGE_TAB = "faults_damage_tab_v1"
+_MEM_DAMAGE_TAB = "faults_damage_tab_v2_pct_dev"
 _MEM_RUNTIME_TABS_BUNDLE = "faults_runtime_tabs_bundle_v15_unified_v14"
 
 
-def _range_operating_hours(date_from: str, date_to: str) -> float:
-    """Approximate daylight operating hours (06:00–19:00) across the selected range."""
+def _range_operating_hours(
+    db: Session,
+    plant_id: str,
+    date_from: str,
+    date_to: str,
+    irr_threshold: float = 10.0,
+) -> float:
+    """Sum of hours in the date range where plant irradiance > threshold (default 10 W/m²).
+
+    Uses the raw_data_generic irradiance/GTI signal and computes forward-dt for each
+    qualifying timestamp to avoid double-counting multi-minute cadences.
+    Falls back to 13 h/day if no irradiance data is found.
+    """
+    from db_perf import choose_data_table
+
     try:
-        d0 = _date.fromisoformat(str(date_from)[:10])
-        d1 = _date.fromisoformat(str(date_to)[:10])
-        days = max(1, (d1 - d0).days + 1)
-        return float(days * 13.0)
+        f_ts = f"{date_from[:10]} 00:00:00"
+        t_ts = f"{date_to[:10]} 23:59:59"
+        table = choose_data_table(db, plant_id, date_from, date_to)
+        sql = text(
+            f"""
+            SELECT DISTINCT timestamp
+            FROM {table}
+            WHERE plant_id = :p
+              AND LOWER(TRIM(signal::text)) IN ('gti', 'irradiance', 'ghi', 'poa_irradiance')
+              AND value::double precision > :thr
+              AND timestamp BETWEEN :f AND :t
+            ORDER BY timestamp
+            """
+        )
+        rows = db.execute(sql, {"p": plant_id, "thr": irr_threshold, "f": f_ts, "t": t_ts}).fetchall()
+        if not rows:
+            raise ValueError("no irradiance rows")
+        import pandas as _pd
+        import numpy as _np
+        ts = _pd.to_datetime([r[0] for r in rows], errors="coerce")
+        dt = ts.diff().dt.total_seconds().fillna(0.0) / 3600.0
+        valid = dt[(dt > 0) & (dt <= 2.0)]
+        step = float(valid.median()) if not valid.empty else (15.0 / 60.0)
+        if not _np.isfinite(step) or step <= 0:
+            step = 15.0 / 60.0
+        return round(float(len(ts)) * step, 2)
     except Exception:
-        return 13.0
+        try:
+            d0 = _date.fromisoformat(str(date_from)[:10])
+            d1 = _date.fromisoformat(str(date_to)[:10])
+            days = max(1, (d1 - d0).days + 1)
+            return float(days * 13.0)
+        except Exception:
+            return 13.0
 
 
 def _compute_damage_tab(db: Session, plant_id: str, _from: str, _to: str) -> dict:
@@ -1884,7 +1925,7 @@ def _unified_fault_categories_core(
             "label": "ByPass Diode/Module Damage",
             "loss_mwh": dmg_loss_mwh,
             "fault_count": dmg_count,
-            "metric_note": "SCB voltage vs top-quartile reference; bypass ~0.33 module or ≥1 module damage",
+            "metric_note": "SCB voltage % deviation from plant reference: 3–8% = bypass diode, 8–30% = module damage; loss = DC_kW × pct_dev × hours",
         },
     ]
 
@@ -1913,19 +1954,41 @@ def _unified_fault_categories_core(
         4,
     )
 
-    op_hours = _range_operating_hours(_from, _to)
+    op_hours = _range_operating_hours(db, plant_id, _from, _to)
     plant_availability_pct = None
     grid_availability_pct = None
-    if plant_total_dc_mw and plant_total_dc_mw > 1e-9 and dc_impact_total_mw is not None:
-        plant_availability_pct = round(
-            max(0.0, min(100.0, (1.0 - float(dc_impact_total_mw) / float(plant_total_dc_mw)) * 100.0)),
-            2,
-        )
+
+    # ── Grid Availability ────────────────────────────────────────────────────
     if op_hours > 0 and gb_hours >= 0:
         grid_availability_pct = round(
             max(0.0, min(100.0, (1.0 - float(gb_hours) / float(op_hours)) * 100.0)),
             2,
         )
+
+    # ── Plant Availability: weighted formula ─────────────────────────────────
+    # Unavailability = Σ (impacted_dc_kw_i × fault_hours_i) / (total_dc_kw × op_hours)
+    # IS contribution: each inverter's DC capacity × its shutdown hours
+    # GB contribution: full plant DC × grid breakdown hours
+    if plant_total_dc_mw and plant_total_dc_mw > 1e-9 and op_hours > 0:
+        _, dc_kw_by_inv = _fault_plant_inverter_dc_kw_maps(db, plant_id)
+        plant_total_dc_kw = plant_total_dc_mw * 1000.0
+        weighted_unavail_kwh = 0.0
+        # IS contribution
+        for inv_row in (is_tab.get("summary") or {}).get("inverters") or []:
+            inv_id = str(inv_row.get("inverter_id") or "")
+            s_hours = float(inv_row.get("shutdown_hours") or 0)
+            inv_dc_kw = float(dc_kw_by_inv.get(inv_id) or 0)
+            if inv_dc_kw > 0 and s_hours > 0:
+                weighted_unavail_kwh += inv_dc_kw * s_hours
+        # GB contribution (whole plant was down)
+        if gb_hours > 0:
+            weighted_unavail_kwh += plant_total_dc_kw * float(gb_hours)
+        total_capacity_kwh = plant_total_dc_kw * op_hours
+        if total_capacity_kwh > 0:
+            plant_availability_pct = round(
+                max(0.0, min(100.0, (1.0 - weighted_unavail_kwh / total_capacity_kwh) * 100.0)),
+                2,
+            )
 
     return {
         "categories": categories,

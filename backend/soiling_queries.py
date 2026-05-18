@@ -259,6 +259,12 @@ def _smooth_cpr_daily(cpr_by_day: Dict[str, Dict[str, float]]) -> Dict[str, Dict
 def _detect_cleaning_and_rain(
     smooth_cpr: Dict[str, Dict[str, float]],
 ) -> Tuple[List[dict], List[dict]]:
+    """Detect rain and cleaning events from CPR jumps.
+
+    Rain is detected FIRST (uniform jump across all/most SCBs).  Days already
+    classified as rain are excluded from the cleaning scan so a rain event is
+    never double-counted as a cleaning.
+    """
     days = sorted(smooth_cpr.keys())
     cleaning: List[dict] = []
     rain: List[dict] = []
@@ -266,26 +272,9 @@ def _detect_cleaning_and_rain(
         return cleaning, rain
 
     scbs = sorted({s for d in days for s in smooth_cpr[d].keys()})
-    for scb in scbs:
-        for i in range(1, len(days)):
-            prev, cur = days[i - 1], days[i]
-            p = smooth_cpr[prev].get(scb)
-            c = smooth_cpr[cur].get(scb)
-            if p is None or c is None or p <= 0:
-                continue
-            jump = (c - p) / p
-            if jump >= 0.06:
-                cleaning.append(
-                    {
-                        "scb_id": scb,
-                        "date": cur,
-                        "cpr_before": round(p, 5),
-                        "cpr_after": round(c, 5),
-                        "recovery_pct": round(jump * 100.0, 2),
-                    }
-                )
-                break
 
+    # ── Step 1: detect rain first ───────────────────────────────────────────
+    rain_dates: set = set()
     for i in range(1, len(days)):
         prev, cur = days[i - 1], days[i]
         jumps: List[float] = []
@@ -303,7 +292,32 @@ def _detect_cleaning_and_rain(
                     "median_recovery_pct": round(float(statistics.median(jumps)) * 100.0, 2),
                 }
             )
+            rain_dates.add(cur)
             break
+
+    # ── Step 2: detect per-SCB cleaning events, skipping rain days ─────────
+    for scb in scbs:
+        for i in range(1, len(days)):
+            prev, cur = days[i - 1], days[i]
+            if cur in rain_dates:
+                continue
+            p = smooth_cpr[prev].get(scb)
+            c = smooth_cpr[cur].get(scb)
+            if p is None or c is None or p <= 0:
+                continue
+            jump = (c - p) / p
+            if jump >= 0.06:
+                cleaning.append(
+                    {
+                        "scb_id": scb,
+                        "date": cur,
+                        "cpr_before": round(p, 5),
+                        "cpr_after": round(c, 5),
+                        "recovery_pct": round(jump * 100.0, 2),
+                    }
+                )
+                break  # one cleaning event per SCB
+
     return cleaning, rain
 
 

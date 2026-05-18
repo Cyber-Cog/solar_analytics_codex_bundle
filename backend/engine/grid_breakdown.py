@@ -16,7 +16,8 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from engine.communication_issue import _load_architecture_meta
-from engine.inverter_shutdown import IS_AC_ZERO_TOL, IS_IRRADIANCE_MIN, _normalize_date_str, _pick_irradiance
+from engine.inverter_shutdown import IS_AC_ZERO_TOL, IS_IRRADIANCE_MIN, _normalize_date_str
+from engine.irr_join import merge_irradiance_onto_ac
 
 
 GB_PR_LOOKBACK_DAYS = int(os.getenv("GB_PR_LOOKBACK_DAYS", "30"))
@@ -79,8 +80,15 @@ def _daily_pr_decimal(db: Session, plant_id: str, day: str, plant_dc_kwp: float)
     if ac.empty or irr.empty:
         return None
 
-    irr_map = _pick_irradiance(irr)
-    ac["irradiance"] = ac["timestamp"].astype(str).map(irr_map)
+    ac = merge_irradiance_onto_ac(
+        ac,
+        ts_col="timestamp",
+        df_irr=irr,
+        signal_col="signal",
+        value_col="irradiance",
+        priority_mode="standard",
+        out_col="irradiance",
+    )
     ac["irradiance"] = pd.to_numeric(ac["irradiance"], errors="coerce")
     ac = ac.dropna(subset=["timestamp", "plant_ac_kw", "irradiance"]).sort_values("timestamp").reset_index(drop=True)
     ac = ac[(ac["irradiance"] > IS_IRRADIANCE_MIN) & (ac["plant_ac_kw"] > 0)].copy()
@@ -167,8 +175,15 @@ def run_grid_breakdown(
     if df_irr.empty:
         return [], []
 
-    irr_map = _pick_irradiance(df_irr)
-    df["irradiance"] = df["timestamp"].astype(str).map(irr_map)
+    df = merge_irradiance_onto_ac(
+        df,
+        ts_col="timestamp",
+        df_irr=df_irr,
+        signal_col="signal",
+        value_col="irradiance",
+        priority_mode="standard",
+        out_col="irradiance",
+    )
     df["irradiance"] = pd.to_numeric(df["irradiance"], errors="coerce")
     df = df.dropna(subset=["irradiance"]).copy()
     if df.empty:

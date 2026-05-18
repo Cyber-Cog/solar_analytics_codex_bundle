@@ -404,6 +404,86 @@ def _plant_pr_pct(total_kwh: Optional[float], plant_dc_kwp: Optional[float], ins
     return round((float(total_kwh) / float(plant_dc_kwp) / float(insolation_kwh_m2_raw)) * 100, 1)
 
 
+def _mv_inverter_matview_exists(db: Session) -> bool:
+    """True when the plant-level inverter MV exists (may still lack rows for a given plant)."""
+    return bool(
+        db.execute(
+            text("SELECT 1 FROM pg_matviews WHERE matviewname = 'mv_inverter_power_1min'")
+        ).fetchone()
+    )
+
+
+def _raw_inverter_ac_count(db: Session, table: str, plant_id: str, f_ts: str, t_ts: str) -> int:
+    row = db.execute(
+        text(
+            f"""
+            SELECT COUNT(*)::bigint
+            FROM {table}
+            WHERE plant_id = :plant_id
+              AND LOWER(TRIM(equipment_level::text)) = 'inverter'
+              AND LOWER(TRIM(signal::text)) = 'ac_power'
+              AND timestamp BETWEEN :f AND :t
+            """
+        ),
+        {"plant_id": plant_id, "f": f_ts, "t": t_ts},
+    ).fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def _plant_ac_daily_energy_rows(
+    db: Session, table: str, plant_id: str, from_ts: str, to_ts: str
+):
+    """MV first; fall back to raw when MV is empty but raw inverter AC exists."""
+    if _mv_inverter_matview_exists(db):
+        rows = db.execute(
+            text(sql_mv_plant_ac_daily_energy()),
+            {"plant_id": plant_id, "from_ts": from_ts, "to_ts": to_ts},
+        ).fetchall()
+        if rows:
+            return rows
+    return db.execute(
+        text(sql_plant_ac_daily_energy(table)),
+        {"plant_id": plant_id, "from_ts": from_ts, "to_ts": to_ts},
+    ).fetchall()
+
+
+def _inverter_performance_rows_mv_or_raw(
+    db: Session, table: str, plant_id: str, f_ts: str, t_ts: str, date_from: str, date_to: str
+) -> List[dict]:
+    if _mv_inverter_matview_exists(db):
+        sql = text(sql_mv_inverter_performance(plant_id))
+        rows_raw = db.execute(sql, {"plant_id": plant_id, "f": f_ts, "t": t_ts}).fetchall()
+        if rows_raw:
+            raw_dicts = [
+                {
+                    "inverter_id": r.equipment_id,
+                    "dc_power": r.dc_power,
+                    "ac_power": r.ac_power,
+                    "energy_kwh": r.energy_kwh,
+                    "dc_capacity_kw": r.dc_cap_kw,
+                }
+                for r in rows_raw
+            ]
+            return finalize_inverter_rows(db, plant_id, raw_dicts, date_from, date_to)
+    return _inverter_performance_table(db, table, plant_id, f_ts, t_ts, date_from, date_to)
+
+
+def _power_vs_gti_rows(
+    db: Session, table: str, plant_id: str, f_ts: str, t_ts: str, lim: int
+):
+    if _mv_inverter_matview_exists(db):
+        rows = db.execute(
+            text(sql_mv_power_vs_gti()),
+            {"plant_id": plant_id, "f": f_ts, "t": t_ts, "limit": lim},
+        ).fetchall()
+        if rows:
+            return rows
+    return db.execute(
+        text(_sql_power_vs_gti(table, lim)),
+        {"plant_id": plant_id, "f": f_ts, "t": t_ts},
+    ).fetchall()
+
+
 def _inverter_performance_table(
     db: Session,
     table: str,
@@ -600,17 +680,10 @@ def energy_generation(
     start_time = time.time()
     f_ts, t_ts = f"{_from} 00:00:00", f"{_to} 23:59:59"
     
-    # Try Materialized View first
-    view_exists = db.execute(text("SELECT 1 FROM pg_matviews WHERE matviewname = 'mv_inverter_power_1min'")).fetchone()
-    if view_exists:
-        sql = text(sql_mv_plant_ac_daily_energy())
-        rows = db.execute(sql, {"plant_id": plant_id, "from_ts": f_ts, "to_ts": t_ts}).fetchall()
-        logger.info(f"Dashboard /energy hit Materialized View in {time.time() - start_time:.4f}s")
-    else:
-        table = choose_data_table(db, plant_id, _from, _to)
-        sql = text(sql_plant_ac_daily_energy(table))
-        rows = db.execute(sql, {"plant_id": plant_id, "from_ts": f_ts, "to_ts": t_ts}).fetchall()
-        logger.info(f"Dashboard /energy hit {table} in {time.time() - start_time:.4f}s")
+    table = choose_data_table(db, plant_id, _from, _to)
+    rows = _plant_ac_daily_energy_rows(db, table, plant_id, f_ts, t_ts)
+    src = "mv" if _mv_inverter_matview_exists(db) and rows and _raw_inverter_ac_count(db, table, plant_id, f_ts, t_ts) == 0 else table
+    logger.info(f"Dashboard /energy hit {src} in {time.time() - start_time:.4f}s rows={len(rows)}")
 
     plant = db.query(Plant).filter(Plant.plant_id == plant_id).first()
     cap   = (plant.capacity_mwp * 1000) if (plant and plant.capacity_mwp) else None
@@ -808,26 +881,9 @@ def inverter_performance(
     start_time = time.time()
     f_ts, t_ts = f"{_from} 00:00:00", f"{_to} 23:59:59"
 
-    view_exists = db.execute(text("SELECT 1 FROM pg_matviews WHERE matviewname = 'mv_inverter_power_1min'")).fetchone()
-    if view_exists:
-        sql = text(sql_mv_inverter_performance(plant_id))
-        rows_raw = db.execute(sql, {"plant_id": plant_id, "f": f_ts, "t": t_ts}).fetchall()
-        # Convert Row objects to dicts for helper
-        rows = []
-        for r in rows_raw:
-            rows.append({
-                "inverter_id": r.equipment_id,
-                "dc_power": r.dc_power,
-                "ac_power": r.ac_power,
-                "energy_kwh": r.energy_kwh,
-                "dc_capacity_kw": r.dc_cap_kw
-            })
-        rows = finalize_inverter_rows(db, plant_id, rows, _from, _to)
-        logger.info(f"Dashboard /inverter-performance hit Materialized View in {time.time() - start_time:.4f}s")
-    else:
-        table = choose_data_table(db, plant_id, _from, _to)
-        rows = _inverter_performance_table(db, table, plant_id, f_ts, t_ts, _from, _to)
-        logger.info(f"Dashboard /inverter-performance hit {table} in {time.time() - start_time:.4f}s")
+    table = choose_data_table(db, plant_id, _from, _to)
+    rows = _inverter_performance_rows_mv_or_raw(db, table, plant_id, f_ts, t_ts, _from, _to)
+    logger.info(f"Dashboard /inverter-performance rows={len(rows)} in {time.time() - start_time:.4f}s")
     result = [
         InverterRow(
             inverter_id=r["inverter_id"],
@@ -862,16 +918,9 @@ def power_vs_gti(
     start_time = time.time()
     lim = _power_vs_gti_row_limit(_from, _to)
 
-    view_exists = db.execute(text("SELECT 1 FROM pg_matviews WHERE matviewname = 'mv_inverter_power_1min'")).fetchone()
-    if view_exists:
-        sql = text(sql_mv_power_vs_gti())
-        rows = db.execute(sql, {"plant_id": plant_id, "f": f"{_from} 00:00:00", "t": f"{_to} 23:59:59", "limit": lim}).fetchall()
-        logger.info(f"Dashboard /power-vs-gti hit Materialized View in {time.time() - start_time:.4f}s")
-    else:
-        table = choose_data_table(db, plant_id, _from, _to)
-        sql = text(_sql_power_vs_gti(table, lim))
-        rows = db.execute(sql, {"plant_id": plant_id, "f": f"{_from} 00:00:00", "t": f"{_to} 23:59:59"}).fetchall()
-        logger.info(f"Dashboard /power-vs-gti hit {table} in {time.time() - start_time:.4f}s")
+    table = choose_data_table(db, plant_id, _from, _to)
+    rows = _power_vs_gti_rows(db, table, plant_id, f"{_from} 00:00:00", f"{_to} 23:59:59", lim)
+    logger.info(f"Dashboard /power-vs-gti rows={len(rows)} in {time.time() - start_time:.4f}s")
     return [
         PowerVsGTIPoint(
             timestamp      = _as_json_str(r.timestamp),
@@ -984,7 +1033,7 @@ def dashboard_bundle(
     """
     _ensure_user_plant_access(db, current_user, plant_id)
     _from, _to = _default_range(date_from, date_to)
-    cache_prefix = "bundle_v10" if include_target_generation else "bundle_v10_lite"
+    cache_prefix = "bundle_v11" if include_target_generation else "bundle_v11_lite"
     cached = cache_get(cache_prefix, plant_id, _from, _to)
     if cached is not None:
         logger.info(
@@ -1000,12 +1049,7 @@ def dashboard_bundle(
     _bundle_t0 = time.perf_counter()
     f_ts, t_ts = f"{_from} 00:00:00", f"{_to} 23:59:59"
     table = choose_data_table(db, plant_id, _from, _to)
-    mv_inv = (
-        db.execute(
-            text("SELECT 1 FROM pg_matviews WHERE matviewname = 'mv_inverter_power_1min'")
-        ).fetchone()
-        is not None
-    )
+    mv_inv = _mv_inverter_matview_exists(db)
     plant = db.query(Plant).filter(Plant.plant_id == plant_id).first()
     cap_kw, cap_badge = _nominal_dc_kw_and_capacity_badge(plant)
     spec_dc_map, arch_dc_map = _inverter_dc_maps(db, plant_id)
@@ -1044,24 +1088,7 @@ def dashboard_bundle(
     def _q_inv_table():
         s = ReadSessionLocal()
         try:
-            if mv_inv:
-                isql = text(sql_mv_inverter_performance(plant_id))
-                rows_raw = s.execute(
-                    isql, {"plant_id": plant_id, "f": f_ts, "t": t_ts}
-                ).fetchall()
-                raw_dicts: List[Dict[str, Any]] = []
-                for r in rows_raw:
-                    raw_dicts.append(
-                        {
-                            "inverter_id": r.equipment_id,
-                            "dc_power": r.dc_power,
-                            "ac_power": r.ac_power,
-                            "energy_kwh": r.energy_kwh,
-                            "dc_capacity_kw": r.dc_cap_kw,
-                        }
-                    )
-                return finalize_inverter_rows(s, plant_id, raw_dicts, _from, _to)
-            return _inverter_performance_table(s, table, plant_id, f_ts, t_ts, _from, _to)
+            return _inverter_performance_rows_mv_or_raw(s, table, plant_id, f_ts, t_ts, _from, _to)
         finally:
             s.close()
 
@@ -1089,15 +1116,7 @@ def dashboard_bundle(
     def _q_energy():
         s = ReadSessionLocal()
         try:
-            if mv_inv:
-                esql = text(sql_mv_plant_ac_daily_energy())
-                return s.execute(
-                    esql, {"plant_id": plant_id, "from_ts": f_ts, "to_ts": t_ts}
-                ).fetchall()
-            return s.execute(
-                text(sql_plant_ac_daily_energy(table)),
-                {"plant_id": plant_id, "from_ts": f_ts, "to_ts": t_ts},
-            ).fetchall()
+            return _plant_ac_daily_energy_rows(s, table, plant_id, f_ts, t_ts)
         finally:
             s.close()
 
@@ -1105,18 +1124,7 @@ def dashboard_bundle(
         s = ReadSessionLocal()
         try:
             pvg_lim = _power_vs_gti_row_limit(_from, _to)
-            if mv_inv:
-                psql = text(sql_mv_power_vs_gti())
-                return s.execute(
-                    psql,
-                    {
-                        "plant_id": plant_id,
-                        "f": f_ts,
-                        "t": t_ts,
-                        "limit": pvg_lim,
-                    },
-                ).fetchall()
-            return s.execute(text(_sql_power_vs_gti(table, pvg_lim)), params).fetchall()
+            return _power_vs_gti_rows(s, table, plant_id, f_ts, t_ts, pvg_lim)
         finally:
             s.close()
 

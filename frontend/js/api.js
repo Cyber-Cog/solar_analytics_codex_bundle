@@ -625,6 +625,8 @@ const Faults = {
   cdInverterStatus:  (plantId, from, to) => apiFetch(`/api/faults/cd-inverter-status?plant_id=${plantId}${from ? `&date_from=${from}` : ''}${to ? `&date_to=${to}` : ''}`),
   cdPage:            (plantId, from, to) => apiFetch(`/api/faults/cd-page?plant_id=${plantId}${from ? `&date_from=${from}` : ''}${to ? `&date_to=${to}` : ''}`),
   cdTimeline:        (plantId, inverterId, from, to) => apiFetch(`/api/faults/cd-timeline?plant_id=${plantId}${inverterId ? `&inverter_id=${encodeURIComponent(inverterId)}` : ''}${from ? `&date_from=${from}` : ''}${to ? `&date_to=${to}` : ''}`),
+  damagePage:        (plantId, from, to) => apiFetch(`/api/faults/damage-page?plant_id=${plantId}${from ? `&date_from=${from}` : ''}${to ? `&date_to=${to}` : ''}`),
+  damageTimeline:    (plantId, scbId, from, to) => apiFetch(`/api/faults/damage-timeline?plant_id=${plantId}&scb_id=${encodeURIComponent(scbId)}${from ? `&date_from=${from}` : ''}${to ? `&date_to=${to}` : ''}`),
   inverterEfficiency:         (plantId, from, to) => apiFetch(`/api/faults/inverter-efficiency?plant_id=${plantId}&date_from=${from}&date_to=${to}`),
   inverterEfficiencyAnalysis: (plantId, from, to) => apiFetch(`/api/faults/inverter-efficiency-analysis?plant_id=${plantId}&date_from=${from}&date_to=${to}`),
   scbPerformanceHeatmap:     (plantId, from, to) => apiFetch(`/api/faults/scb-performance-heatmap?plant_id=${plantId}&date_from=${from || ''}&date_to=${to || ''}`),

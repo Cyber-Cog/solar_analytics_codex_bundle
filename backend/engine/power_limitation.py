@@ -13,6 +13,8 @@ import numpy as np
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from engine.irr_join import merge_irradiance_onto_ac
+
 from database import SessionLocal
 
 # 10:00 AM to 03:00 PM (15:00) — configurable
@@ -134,25 +136,31 @@ def run_power_limitation(
     df["ac_kw"] = pd.to_numeric(df["ac_kw"], errors="coerce").fillna(0)
 
     df["ts"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    df = df.dropna(subset=["ts"]).sort_values(["inverter_id", "ts"]).reset_index(drop=True)
+    df = df.dropna(subset=["ts"]).sort_values(["ts", "inverter_id"]).reset_index(drop=True)
     if df.empty:
         return [], []
 
-    irr_dict = {}
     if irr_rows:
         df_irr = pd.DataFrame(irr_rows, columns=["timestamp", "signal", "value"])
         df_irr["value"] = pd.to_numeric(df_irr["value"], errors="coerce")
-        from pandas import Categorical
-        df_irr["signal_cat"] = Categorical(df_irr["signal"], categories=["irradiance", "gti", "ghi"], ordered=True)
-        df_irr = df_irr.sort_values("signal_cat").drop_duplicates("timestamp")
-        irr_dict = dict(zip(df_irr["timestamp"], df_irr["value"]))
+        df_irr = df_irr.dropna(subset=["timestamp", "value"])
+        df = merge_irradiance_onto_ac(
+            df,
+            ts_col="timestamp",
+            df_irr=df_irr,
+            value_col="value",
+            priority_mode="standard",
+            out_col="irradiance",
+        )
+        df["irradiance"] = pd.to_numeric(df["irradiance"], errors="coerce").fillna(0.0)
+    else:
+        df["irradiance"] = 0.0
 
     # 1. Normalized Power
     cap = df.groupby("inverter_id")["ac_kw"].transform(lambda x: max(float(x.quantile(0.99)), 1.0))
     df["norm_pwr"] = df["ac_kw"] / cap
 
-    # 2. Add Irradiance
-    df["irradiance"] = df["timestamp"].map(irr_dict).fillna(0)
+    # 2. Irradiance (from merge_asof above; missing → 0 for PL gating)
 
     # 3. Plant Median Normalized Power
     pl_med = df.groupby("timestamp")["norm_pwr"].median().rename("median_norm_pwr")
@@ -177,7 +185,8 @@ def run_power_limitation(
             step_minutes = float(step_vals.median())
     if not np.isfinite(step_minutes) or step_minutes <= 0:
         step_minutes = 1.0
-    rolling_points = max(1, int(round(5.0 / step_minutes)))
+    # Need >=2 samples in the lookback window so cond_drop can fire on coarse cadence (e.g. 15 min).
+    rolling_points = max(2, int(round(5.0 / step_minutes)))
 
     rolling_max = df.groupby("inverter_id")["norm_pwr"].transform(
         lambda x: x.rolling(rolling_points, min_periods=1).max()

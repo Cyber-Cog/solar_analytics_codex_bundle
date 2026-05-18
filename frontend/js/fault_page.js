@@ -154,8 +154,15 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
   const [cdRows, setCdRows] = useState([]);
   const [cdLoading, setCdLoading] = useState(false);
   const [selectedCdInverter, setSelectedCdInverter] = useState(null);
+  const [selectedCdKind, setSelectedCdKind] = useState(null);
   const [cdTimeline, setCdTimeline] = useState([]);
   const [cdTimelineLoading, setCdTimelineLoading] = useState(false);
+  const [damageSummary, setDamageSummary] = useState(null);
+  const [damageRows, setDamageRows] = useState([]);
+  const [damageLoading, setDamageLoading] = useState(false);
+  const [selectedDamageScb, setSelectedDamageScb] = useState(null);
+  const [damageTimeline, setDamageTimeline] = useState([]);
+  const [damageTimelineLoading, setDamageTimelineLoading] = useState(false);
   // Review sign-off state
   const [reviews, setReviews]       = useState({});      // saved reviews keyed by scb_id
   const [localEdits, setLocalEdits] = useState({});      // unsaved in-progress edits
@@ -384,6 +391,28 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
       .catch(() => setCdTimeline([]))
       .finally(() => setCdTimelineLoading(false));
   }, [selectedCdInverter, plantId, dateFrom, dateTo]);
+
+  useEffect(() => {
+    if (subView !== 'damage' || !plantId) return;
+    setDamageLoading(true);
+    window.SolarAPI.Faults.damagePage(plantId, dateFrom, dateTo)
+      .then((page) => {
+        setDamageSummary((page && page.summary) || null);
+        setDamageRows(((page && page.scb_status) && page.scb_status.data) || []);
+      })
+      .catch(() => { setDamageSummary(null); setDamageRows([]); })
+      .finally(() => setDamageLoading(false));
+  }, [subView, plantId, dateFrom, dateTo]);
+
+  useEffect(() => {
+    if (!selectedDamageScb || !plantId) return;
+    setDamageTimelineLoading(true);
+    setDamageTimeline([]);
+    window.SolarAPI.Faults.damageTimeline(plantId, selectedDamageScb, dateFrom, dateTo)
+      .then((res) => setDamageTimeline((res && res.data) || []))
+      .catch(() => setDamageTimeline([]))
+      .finally(() => setDamageTimelineLoading(false));
+  }, [selectedDamageScb, plantId, dateFrom, dateTo]);
 
   useEffect(() => {
     if (subView !== 'scb_perf' || !plantId) return;
@@ -713,12 +742,21 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
     else if (inv.kind === 'scb_perf') setSoilingModalScb(inv.scb_id);
     else if (inv.kind === 'clip') {
       goFaultSub('clip');
-      if (inv.inverter_id) setSelectedCdInverter(inv.inverter_id);
+      if (inv.inverter_id) {
+        setSelectedCdKind('clip');
+        setSelectedCdInverter(inv.inverter_id);
+      }
     } else if (inv.kind === 'derate') {
       goFaultSub('derate');
-      if (inv.inverter_id) setSelectedCdInverter(inv.inverter_id);
+      if (inv.inverter_id) {
+        setSelectedCdKind('derate');
+        setSelectedCdInverter(inv.inverter_id);
+      }
     } else if (inv.kind === 'inv_eff') {
       goFaultSub('inv_eff');
+    } else if (inv.kind === 'damage') {
+      goFaultSub('damage');
+      if (inv.scb_id) setSelectedDamageScb(inv.scb_id);
     }
   }, [goFaultSub]);
 
@@ -913,6 +951,25 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
         },
           h('strong', { style: { color: '#fbbf24' } }, 'Compatibility mode: '),
           (unifiedFeed._merge_reason || 'Unified feed endpoint missing; data was loaded from individual fault APIs. Restart the backend to enable /api/faults/unified-feed.')),
+        (unifiedFeed.totals && (unifiedFeed.totals.plant_availability_pct != null || unifiedFeed.totals.grid_availability_pct != null)) && h('div', {
+          className: 'kpi-grid',
+          style: { gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', marginBottom: 16 },
+        },
+          unifiedFeed.totals.plant_availability_pct != null && h(KpiCard, {
+            label: 'Plant availability',
+            value: unifiedFeed.totals.plant_availability_pct,
+            unit: '%',
+            color: '#10b981',
+            caption: '1 − impacted DC / total plant DC (unified feed)',
+          }),
+          unifiedFeed.totals.grid_availability_pct != null && h(KpiCard, {
+            label: 'Grid availability',
+            value: unifiedFeed.totals.grid_availability_pct,
+            unit: '%',
+            color: '#3b82f6',
+            caption: `1 − grid breakdown h / ${Number(unifiedFeed.totals.operating_hours || 0).toFixed(0)} h operating`,
+          }),
+        ),
         h('div', { className: 'fo-grid' },
           (() => {
             const CAT_STYLE = {
@@ -1310,7 +1367,11 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
     (subView === 'clip' || subView === 'derate') && (() => {
       const isClip = subView === 'clip';
       const cat = isClip ? 'clip' : 'derate';
-      const rowsForTab = cdRows.filter((r) => r.category === cat);
+      const rowsForTab = cdRows.filter((r) => {
+        const clipLoss = Number(r.loss_power_clipping_kwh || 0) + Number(r.loss_current_clipping_kwh || 0);
+        const derateLoss = Number(r.loss_static_derating_kwh || 0) + Number(r.loss_dynamic_derating_kwh || 0);
+        return isClip ? clipLoss > 0 : derateLoss > 0;
+      });
       const invLossForTab = (cdSummary?.inverter_loss || []).filter((r) => r.category === cat);
       const dq = cdSummary?.data_quality || {};
 
@@ -1346,7 +1407,7 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
         }, csvValue: (row) => `${row.investigation_window_start || ''} - ${row.investigation_window_end || ''}` },
         { key: 'action', label: 'Investigate', sortable: false, render: (row) => h('button', {
           className: 'btn btn-primary', style: { padding: '4px 8px', fontSize: 12 },
-          onClick: () => setSelectedCdInverter(row.inverter_id),
+          onClick: () => { setSelectedCdKind('clip'); setSelectedCdInverter(row.inverter_id); },
         }, 'Investigate'), csvValue: () => 'Investigate' },
       ];
 
@@ -1366,7 +1427,7 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
         }, csvValue: (row) => `${row.investigation_window_start || ''} - ${row.investigation_window_end || ''}` },
         { key: 'action', label: 'Investigate', sortable: false, render: (row) => h('button', {
           className: 'btn btn-primary', style: { padding: '4px 8px', fontSize: 12 },
-          onClick: () => setSelectedCdInverter(row.inverter_id),
+          onClick: () => { setSelectedCdKind('derate'); setSelectedCdInverter(row.inverter_id); },
         }, 'Investigate'), csvValue: () => 'Investigate' },
       ];
 
@@ -1440,7 +1501,7 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
     (subView === 'clip' || subView === 'derate') && selectedCdInverter && ReactDOM.createPortal(
         h('div', {
           style: { position: 'fixed', inset: 0, background: 'rgba(2,6,23,0.72)', zIndex: 1200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 },
-          onClick: () => setSelectedCdInverter(null)
+          onClick: () => { setSelectedCdKind(null); setSelectedCdInverter(null); }
         },
           h('div', {
             onClick: (e) => e.stopPropagation(),
@@ -1451,7 +1512,7 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
                 h('div', { style: { fontSize: 18, fontWeight: 700, color: 'var(--text, #e2e8f0)' } }, `Investigate · ${selectedCdInverter}`),
                 h('div', { style: { fontSize: 12, color: 'var(--text-soft, #94a3b8)', marginTop: 2 } }, 'Actual AC power vs GTI-derived virtual curve. Coloured bands mark clipping / derating minutes.')
               ),
-              h('button', { className: 'btn', onClick: () => setSelectedCdInverter(null), style: { padding: '6px 12px' } }, '✕ Close')
+              h('button', { className: 'btn', onClick: () => { setSelectedCdKind(null); setSelectedCdInverter(null); }, style: { padding: '6px 12px' } }, '✕ Close')
             ),
 
             cdTimelineLoading && h('div', { style: { padding: 40, textAlign: 'center', color: 'var(--text-soft)' } }, h(Spinner), ' Loading timeline…'),
@@ -1460,9 +1521,17 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
 
               !cdTimelineLoading && cdTimeline.length > 0 && (() => {
               // ECharts CD timeline — replaces legacy ComposedChart (Recharts removed)
+              const kindStates = selectedCdKind === 'clip'
+                ? new Set(['normal', 'power_clip', 'current_clip'])
+                : selectedCdKind === 'derate'
+                  ? new Set(['normal', 'static_derate', 'dynamic_derate'])
+                  : null;
+              const timelineForView = kindStates
+                ? cdTimeline.filter((d) => kindStates.has(d.state || 'normal'))
+                : cdTimeline;
               const runs = [];
               let cur = null;
-              for (const p of cdTimeline) {
+              for (const p of timelineForView) {
                 if (p.state && p.state !== 'normal') {
                   if (cur && cur.state === p.state) { cur.end = p.timestamp; }
                   else { if (cur) runs.push(cur); cur = { state: p.state, start: p.timestamp, end: p.timestamp }; }
@@ -1470,39 +1539,71 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
               }
               if (cur) runs.push(cur);
 
-              const xData = cdTimeline.map(d => String(d.timestamp || '').slice(5, 16));
+              const xData = timelineForView.map(d => String(d.timestamp || '').slice(5, 16));
               const markAreas = runs.map(run => ([
                 { xAxis: String(run.start || '').slice(5, 16), itemStyle: { color: CD_KIND_COLOR[run.state] || '#64748b', opacity: 0.15 } },
                 { xAxis: String(run.end || '').slice(5, 16) }
               ]));
 
+              const clipLegend = ['Virtual (expected)', 'Actual', 'GTI (W/m²)'];
+              const derateLegend = clipLegend;
+              const legendNames = selectedCdKind === 'clip' ? clipLegend
+                : selectedCdKind === 'derate' ? derateLegend
+                  : clipLegend;
               const cdOption = {
                 backgroundColor: 'transparent',
-                tooltip: { trigger: 'axis', backgroundColor: '#0f172a', borderColor: '#1e293b', textStyle: { color: '#e2e8f0', fontSize: 12 }, axisPointer: { type: 'cross' } },
-                legend: { bottom: 0, textStyle: { color: '#94a3b8', fontSize: 12 } },
-                grid: { top: 20, right: 80, left: 60, bottom: 60 },
-                xAxis: { type: 'category', data: xData, axisLabel: { color: '#94a3b8', fontSize: 10 }, axisLine: { lineStyle: { color: '#1e293b' } } },
+                tooltip: {
+                  trigger: 'axis',
+                  backgroundColor: 'var(--surface, #0f172a)',
+                  borderColor: 'var(--border, #1e293b)',
+                  textStyle: { color: 'var(--text, #e2e8f0)', fontSize: 12 },
+                  axisPointer: { type: 'cross' },
+                  formatter: (params) => {
+                    if (!params || !params.length) return '';
+                    const head = params[0].axisValue || '';
+                    const lines = params.map((p) => `${p.marker} ${p.seriesName}: <b>${Number(p.value).toFixed(2)}</b>`);
+                    return `${head}<br/>${lines.join('<br/>')}`;
+                  },
+                },
+                legend: { bottom: 0, data: legendNames, textStyle: { color: 'var(--text-soft, #94a3b8)', fontSize: 12 } },
+                toolbox: {
+                  right: 8,
+                  feature: { dataZoom: { yAxisIndex: 'none' }, restore: {}, saveAsImage: {} },
+                  iconStyle: { borderColor: 'var(--text-soft, #94a3b8)' },
+                },
+                dataZoom: [
+                  { type: 'inside', xAxisIndex: 0 },
+                  { type: 'slider', xAxisIndex: 0, height: 18, bottom: 28, borderColor: 'var(--border, #1e293b)', textStyle: { color: 'var(--text-soft)' } },
+                ],
+                grid: { top: 20, right: 80, left: 60, bottom: 88 },
+                xAxis: { type: 'category', data: xData, axisLabel: { color: 'var(--text-soft, #94a3b8)', fontSize: 10 }, axisLine: { lineStyle: { color: 'var(--border, #1e293b)' } } },
                 yAxis: [
-                  { name: 'Power (kW)', type: 'value', axisLabel: { color: '#94a3b8', fontSize: 10 }, axisLine: { lineStyle: { color: '#1e293b' } }, splitLine: { lineStyle: { color: '#1e293b', type: 'dashed' } } },
-                  { name: 'GTI (W/m²)', type: 'value', position: 'right', axisLabel: { color: '#f59e0b', fontSize: 10 }, axisLine: { lineStyle: { color: '#f59e0b' } }, splitLine: { show: false } }
+                  { name: 'Power (kW)', type: 'value', axisLabel: { color: 'var(--text-soft, #94a3b8)', fontSize: 10 }, axisLine: { lineStyle: { color: 'var(--border, #1e293b)' } }, splitLine: { lineStyle: { color: 'var(--border, #1e293b)', type: 'dashed' } } },
+                  { name: 'GTI (W/m²)', type: 'value', position: 'right', axisLabel: { color: '#f59e0b', fontSize: 10 }, axisLine: { lineStyle: { color: '#f59e0b' } }, splitLine: { show: false } },
                 ],
                 series: [
-                  { name: 'Virtual (expected)', type: 'line', yAxisIndex: 0, data: cdTimeline.map(d => d.virtual_ac_kw), lineStyle: { color: '#10b981', width: 2, type: 'dashed' }, symbol: 'none', markArea: { silent: true, data: markAreas } },
-                  { name: 'Actual', type: 'line', yAxisIndex: 0, data: cdTimeline.map(d => d.actual_ac_kw), lineStyle: { color: '#3b82f6', width: 2 }, symbol: 'none' },
-                  { name: 'GTI (W/m²)', type: 'line', yAxisIndex: 1, data: cdTimeline.map(d => d.gti), lineStyle: { color: '#f59e0b', width: 1.3, opacity: 0.8 }, symbol: 'none' },
-                ]
+                  { name: 'Virtual (expected)', type: 'line', yAxisIndex: 0, data: timelineForView.map(d => d.virtual_ac_kw), lineStyle: { color: '#10b981', width: 2, type: 'dashed' }, symbol: 'none', markArea: markAreas.length ? { silent: true, data: markAreas } : undefined },
+                  { name: 'Actual', type: 'line', yAxisIndex: 0, data: timelineForView.map(d => d.actual_ac_kw), lineStyle: { color: '#3b82f6', width: 2 }, symbol: 'none' },
+                  { name: 'GTI (W/m²)', type: 'line', yAxisIndex: 1, data: timelineForView.map(d => d.gti), lineStyle: { color: '#f59e0b', width: 1.3, opacity: 0.8 }, symbol: 'none' },
+                ],
               };
               return h(window.EChart || 'div', { style: { width: '100%', height: 460 }, option: cdOption });
             })(),
 
-            // Legend of kinds
             !cdTimelineLoading && cdTimeline.length > 0 && h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 10, fontSize: 11, color: 'var(--text-soft)' } },
-              Object.entries(CD_KIND_COLOR).filter(([k]) => k !== 'normal').map(([k, c]) =>
-                h('span', { key: k, style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
-                  h('span', { style: { width: 10, height: 10, borderRadius: 2, background: c, opacity: 0.6 } }),
-                  CD_KIND_LABELS[k] || k
+              Object.entries(CD_KIND_COLOR)
+                .filter(([k]) => {
+                  if (k === 'normal') return false;
+                  if (selectedCdKind === 'clip') return k === 'power_clip' || k === 'current_clip';
+                  if (selectedCdKind === 'derate') return k === 'static_derate' || k === 'dynamic_derate';
+                  return true;
+                })
+                .map(([k, c]) =>
+                  h('span', { key: k, style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
+                    h('span', { style: { width: 10, height: 10, borderRadius: 2, background: c, opacity: 0.6 } }),
+                    CD_KIND_LABELS[k] || k
+                  )
                 )
-              )
             )
           )
         ),
@@ -1573,6 +1674,23 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
           unit: soilingPlant && soilingPlant.revenue_loss_inr != null ? '₹' : '',
           color: '#7c3aed',
         }),
+        soilingPlant && soilingPlant.cpr_soiling_rate_per_day != null && h(KpiCard, {
+          label: 'CPR decline (top SCB)',
+          value: soilingPlant.cpr_soiling_rate_per_day,
+          unit: '/day',
+          color: '#0ea5e9',
+        }),
+      ),
+
+      !scbPerfLoading && soilingPlant && ((soilingPlant.cleaning_events || []).length > 0 || (soilingPlant.rain_events || []).length > 0) && h(Card, { title: 'Cleaning & rain recovery (CPR)' },
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13 } },
+          (soilingPlant.cleaning_events || []).map((ev, i) => h('div', { key: `cl-${i}` },
+            h('strong', null, ev.scb_id), ` — cleaning on ${ev.date}: CPR ${ev.cpr_before} → ${ev.cpr_after} (+${ev.recovery_pct}%)`,
+          )),
+          (soilingPlant.rain_events || []).map((ev, i) => h('div', { key: `rn-${i}` },
+            `Rain recovery on ${ev.date}: ${ev.scbs_recovered} SCBs, median +${ev.median_recovery_pct}% CPR`,
+          )),
+        ),
       ),
 
       !scbPerfLoading && soilingPlant && soilingPlant.soiling_rate_median_delta_pp != null && h('div', { style: { fontSize: 12, color: 'var(--text-muted)', marginTop: -4 } },
@@ -1883,9 +2001,78 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
       !scbPerfLoading && scbPerfHeatmap && (!scbPerfHeatmap.scbs || scbPerfHeatmap.scbs.length === 0) && h(Card, { title: 'Soiling heatmap' }, h('div', { className: 'empty-state', style: { minHeight: 200 } }, 'No SCB current data for the selected date range.')),
     ),
 
-    subView === 'damage' && h('div', { className: 'empty-state', style: { minHeight: 300, background: 'var(--panel)', borderRadius: 12, border: '1px solid var(--line)' } },
-      h('div', { style: { fontSize: 16, fontWeight: 600, marginBottom: 8 } }, 'Algorithm Under Development'),
-      h('p', { style: { color: 'var(--text-muted)' } }, 'This diagnostic feature will be available in a future update.')
+    subView === 'damage' && h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16 } },
+      damageLoading && h('div', { style: { padding: 24, textAlign: 'center', color: 'var(--text-soft)' } }, h(Spinner), ' Loading damage diagnostics…'),
+      !damageLoading && h('div', { className: 'kpi-grid', style: { gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' } },
+        h(KpiCard, { label: 'Bypass diode (SCBs)', value: damageSummary ? (damageSummary.active_bypass_scbs ?? '—') : '—', unit: '', color: '#f97316' }),
+        h(KpiCard, { label: 'Module damage (SCBs)', value: damageSummary ? (damageSummary.active_damage_scbs ?? '—') : '—', unit: '', color: '#dc2626' }),
+        h(KpiCard, { label: 'Energy impact', value: damageSummary && damageSummary.loss_total_kwh != null ? (damageSummary.loss_total_kwh / 1000).toFixed(3) : '—', unit: 'MWh', color: '#8b5cf6' }),
+      ),
+      !damageLoading && h(Card, { title: `SCB voltage faults (${damageRows.length})` },
+        h(DataTable, {
+          columns: [
+            { key: 'scb_id', label: 'SCB', sortValue: (r) => r.scb_id || '' },
+            { key: 'inverter_id', label: 'Inverter', sortValue: (r) => r.inverter_id || '' },
+            { key: 'fault_kind', label: 'Kind', render: (r) => String(r.fault_kind || '').replace(/_/g, ' ') },
+            { key: 'module_equiv', label: 'Module eq.', sortValue: (r) => r.module_equiv ?? 0 },
+            { key: 'total_energy_loss_kwh', label: 'Loss (kWh)', sortValue: (r) => r.total_energy_loss_kwh ?? 0 },
+            {
+              key: 'action',
+              label: 'Investigate',
+              sortable: false,
+              render: (r) => h('button', {
+                type: 'button',
+                className: 'btn btn-primary',
+                style: { padding: '4px 8px', fontSize: 12 },
+                onClick: () => setSelectedDamageScb(r.scb_id),
+              }, 'Chart'),
+            },
+          ],
+          rows: damageRows,
+          emptyMessage: 'No bypass diode or module damage pattern detected in this range.',
+          maxHeight: 420,
+          initialSortKey: 'total_energy_loss_kwh',
+          initialSortDir: 'desc',
+        }),
+      ),
+    ),
+
+    subView === 'damage' && selectedDamageScb && ReactDOM.createPortal(
+      h('div', {
+        style: { position: 'fixed', inset: 0, background: 'rgba(2,6,23,0.72)', zIndex: 1200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 },
+        onClick: () => setSelectedDamageScb(null),
+      },
+        h('div', {
+          onClick: (e) => e.stopPropagation(),
+          style: { background: 'var(--surface, #0f172a)', border: '1px solid var(--border, #1e293b)', borderRadius: 14, width: 'min(960px, 96vw)', maxHeight: '92vh', overflow: 'auto', padding: 20 },
+        },
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', marginBottom: 12 } },
+            h('div', null,
+              h('div', { style: { fontSize: 18, fontWeight: 700 } }, `Investigate · ${selectedDamageScb}`),
+              h('div', { style: { fontSize: 12, color: 'var(--text-soft)', marginTop: 4 } }, 'SCB voltage vs plant reference (top-quartile inverter medians)'),
+            ),
+            h('button', { className: 'btn', onClick: () => setSelectedDamageScb(null) }, '✕ Close'),
+          ),
+          damageTimelineLoading && h('div', { style: { padding: 40, textAlign: 'center' } }, h(Spinner)),
+          !damageTimelineLoading && damageTimeline.length > 0 && h(window.EChart, {
+            style: { width: '100%', height: 400 },
+            option: {
+              backgroundColor: 'transparent',
+              tooltip: { trigger: 'axis', backgroundColor: 'var(--surface)', borderColor: 'var(--border)', textStyle: { color: 'var(--text)' } },
+              legend: { bottom: 0, textStyle: { color: 'var(--text-soft)' } },
+              dataZoom: [{ type: 'inside' }, { type: 'slider', height: 18, bottom: 24 }],
+              toolbox: { feature: { restore: {}, dataZoom: {} } },
+              xAxis: { type: 'category', data: damageTimeline.map((d) => String(d.timestamp || '').slice(5, 16)), axisLabel: { color: 'var(--text-soft)' } },
+              yAxis: { name: 'V', type: 'value', axisLabel: { color: 'var(--text-soft)' }, splitLine: { lineStyle: { type: 'dashed', color: 'var(--border)' } } },
+              series: [
+                { name: 'Reference V', type: 'line', data: damageTimeline.map((d) => d.reference_v), lineStyle: { type: 'dashed', color: '#10b981' }, symbol: 'none' },
+                { name: 'SCB V', type: 'line', data: damageTimeline.map((d) => d.voltage_v), lineStyle: { color: '#3b82f6' }, symbol: 'none' },
+              ],
+            },
+          }),
+        ),
+      ),
+      document.body,
     ),
 
     scbStatus.length > 0 && subView === 'ds' && h('div', { style: { display: 'grid', gap: 16, gridTemplateColumns: '1fr' } },

@@ -61,17 +61,59 @@ router = APIRouter(prefix="/api/faults", tags=["Faults"])
 DS_SUMMARY_PAYLOAD_VERSION = 9
 # Bump when unified-feed category semantics change (e.g. IS energy/count) so DB
 # unified_fault_snapshot rows are not served stale for exact date_from/date_to keys.
-UNIFIED_FAULT_PAYLOAD_VERSION = 12
+UNIFIED_FAULT_PAYLOAD_VERSION = 14
 GB_TAB_PAYLOAD_VERSION = 2
+# Bump when IS tab JSON semantics change (e.g. irradiance join) so DB snapshots recompute.
+IS_TAB_PAYLOAD_VERSION = 2
+# Bump when CD tab JSON semantics change (e.g. GTI merge_asof) so DB snapshots recompute.
+CD_TAB_PAYLOAD_VERSION = 3
 DS_MIN_CONFIRMED_POINTS = int(os.getenv("DS_MIN_CONFIRMED_POINTS", "3"))
 
 _MEM_PL_PAGE = "faults_pl_page_v2"
-_MEM_IS_TAB = "faults_is_tab_v8_unified_payload_v12"
+_MEM_IS_TAB = "faults_is_tab_v9_irr_asof_unified_v13"
 _MEM_GB_TAB = "faults_gb_tab_v4_pr_loss"
 _MEM_COMM_TAB = "faults_comm_tab_v2"
 _MEM_INV_EFF_AGG = "faults_inv_eff_agg_v4"
-_MEM_CD_TAB = "faults_cd_tab_v3_fast"
-_MEM_RUNTIME_TABS_BUNDLE = "faults_runtime_tabs_bundle_v14_unified_v12"
+_MEM_CD_TAB = "faults_cd_tab_v4_irr_asof"
+_MEM_DAMAGE_TAB = "faults_damage_tab_v1"
+_MEM_RUNTIME_TABS_BUNDLE = "faults_runtime_tabs_bundle_v15_unified_v14"
+
+
+def _range_operating_hours(date_from: str, date_to: str) -> float:
+    """Approximate daylight operating hours (06:00–19:00) across the selected range."""
+    try:
+        d0 = _date.fromisoformat(str(date_from)[:10])
+        d1 = _date.fromisoformat(str(date_to)[:10])
+        days = max(1, (d1 - d0).days + 1)
+        return float(days * 13.0)
+    except Exception:
+        return 13.0
+
+
+def _compute_damage_tab(db: Session, plant_id: str, _from: str, _to: str) -> dict:
+    from engine.module_damage import run_module_damage, summarise_module_damage
+
+    status, timeline, meta = run_module_damage(db, plant_id, _from, _to)
+    summary = summarise_module_damage(status, meta)
+    timelines_by_scb: dict = {}
+    for row in timeline:
+        sid = row.get("scb_id")
+        if sid:
+            timelines_by_scb.setdefault(str(sid), []).append(row)
+    return {
+        "summary": summary,
+        "scb_status": {"data": status},
+        "_timelines_by_scb": timelines_by_scb,
+    }
+
+
+def _damage_tab_with_cache(db: Session, plant_id: str, _from: str, _to: str) -> dict:
+    hit = _dc_get(_MEM_DAMAGE_TAB, plant_id, _from, _to)
+    if hit is not None:
+        return hit
+    out = _compute_damage_tab(db, plant_id, _from, _to)
+    _dc_set(_MEM_DAMAGE_TAB, plant_id, _from, _to, out)
+    return out
 
 def _compute_inv_eff_aggregate(
     db: Session, plant_id: str, _from: str, _to: str
@@ -258,7 +300,11 @@ def _compute_is_tab(db: Session, plant_id: str, _from: str, _to: str) -> dict:
         ],
     }
     data = [s for s in inv_status if (s.get("shutdown_points") or 0) > 0]
-    return {"summary": summary, "inverter_status": {"data": data}}
+    return {
+        "payload_version": IS_TAB_PAYLOAD_VERSION,
+        "summary": summary,
+        "inverter_status": {"data": data},
+    }
 
 
 def _is_tab_with_cache(db: Session, plant_id: str, _from: str, _to: str) -> dict:
@@ -266,7 +312,7 @@ def _is_tab_with_cache(db: Session, plant_id: str, _from: str, _to: str) -> dict
     if hit is not None:
         return hit
     snap = try_snapshot_payload(db, plant_id, _from, _to, KIND_IS_TAB)
-    if snap is not None:
+    if snap is not None and int(snap.get("payload_version") or 0) >= IS_TAB_PAYLOAD_VERSION:
         _dc_set(_MEM_IS_TAB, plant_id, _from, _to, snap)
         return snap
     out = _compute_is_tab(db, plant_id, _from, _to)
@@ -353,6 +399,7 @@ def _compute_cd_tab(db: Session, plant_id: str, _from: str, _to: str) -> dict:
     inv_status, timelines_by_inv, eng_meta = run_clipping_derating(db, plant_id, _from, _to)
     summary = summarise_clipping_derating(inv_status, eng_meta)
     return {
+        "payload_version": CD_TAB_PAYLOAD_VERSION,
         "summary": summary,
         "inverter_status": inv_status,
         "engine_meta": eng_meta,
@@ -366,7 +413,7 @@ def _cd_tab_with_cache(db: Session, plant_id: str, _from: str, _to: str) -> dict
     if hit is not None:
         return hit
     snap = try_snapshot_payload(db, plant_id, _from, _to, KIND_CD_TAB)
-    if snap is not None:
+    if snap is not None and int(snap.get("payload_version") or 0) >= CD_TAB_PAYLOAD_VERSION:
         _dc_set(_MEM_CD_TAB, plant_id, _from, _to, snap)
         return snap
     out = _compute_cd_tab(db, plant_id, _from, _to)
@@ -1708,6 +1755,7 @@ def _unified_fault_categories_core(
     gb_tab = _gb_tab_with_cache(db, plant_id, _from, _to)
     comm_tab = _comm_tab_with_cache(db, plant_id, _from, _to)
     cd_tab = _cd_tab_with_cache(db, plant_id, _from, _to)
+    damage_tab = _damage_tab_with_cache(db, plant_id, _from, _to)
 
     soiling_plant: dict = {}
     soiling_rank: dict = {"rows": []}
@@ -1762,6 +1810,10 @@ def _unified_fault_categories_core(
     inv_eff_loss_mwh, inv_eff_active, inv_eff_inv_ids, inv_eff_per_inv = _inv_eff_aggregate_with_cache(
         db, plant_id, _from, _to
     )
+
+    dmg_sum = damage_tab.get("summary") or {}
+    dmg_loss_mwh = round(float(dmg_sum.get("loss_total_kwh") or 0) / 1000.0, 4)
+    dmg_count = int(dmg_sum.get("active_bypass_scbs") or 0) + int(dmg_sum.get("active_damage_scbs") or 0)
 
     categories = [
         {
@@ -1830,9 +1882,9 @@ def _unified_fault_categories_core(
         {
             "id": "damage",
             "label": "ByPass Diode/Module Damage",
-            "loss_mwh": 0.0,
-            "fault_count": 0,
-            "metric_note": "No unified rows yet — use category tab",
+            "loss_mwh": dmg_loss_mwh,
+            "fault_count": dmg_count,
+            "metric_note": "SCB voltage vs top-quartile reference; bypass ~0.33 module or ≥1 module damage",
         },
     ]
 
@@ -1861,6 +1913,20 @@ def _unified_fault_categories_core(
         4,
     )
 
+    op_hours = _range_operating_hours(_from, _to)
+    plant_availability_pct = None
+    grid_availability_pct = None
+    if plant_total_dc_mw and plant_total_dc_mw > 1e-9 and dc_impact_total_mw is not None:
+        plant_availability_pct = round(
+            max(0.0, min(100.0, (1.0 - float(dc_impact_total_mw) / float(plant_total_dc_mw)) * 100.0)),
+            2,
+        )
+    if op_hours > 0 and gb_hours >= 0:
+        grid_availability_pct = round(
+            max(0.0, min(100.0, (1.0 - float(gb_hours) / float(op_hours)) * 100.0)),
+            2,
+        )
+
     return {
         "categories": categories,
         "totals": {
@@ -1868,6 +1934,10 @@ def _unified_fault_categories_core(
             "fault_count": total_fault_count,
             "plant_total_dc_mw": round(plant_total_dc_mw, 4) if plant_total_dc_mw > 1e-9 else None,
             "dc_impact_total_mw": dc_impact_total_mw,
+            "operating_hours": round(op_hours, 2),
+            "grid_breakdown_hours": round(gb_hours, 3),
+            "plant_availability_pct": plant_availability_pct,
+            "grid_availability_pct": grid_availability_pct,
         },
         "ds_summary": ds_summary,
         "pl_page": pl_page,
@@ -1875,6 +1945,7 @@ def _unified_fault_categories_core(
         "gb_tab": gb_tab,
         "comm_tab": comm_tab,
         "cd_tab": cd_tab,
+        "damage_tab": damage_tab,
         "soiling_rank_rows": sol_rows_raw,
         "inv_eff_per_inv": inv_eff_per_inv,
     }
@@ -1922,6 +1993,7 @@ def _unified_feed_rows_and_categories(
     gb_tab = core["gb_tab"]
     comm_tab = core["comm_tab"]
     cd_tab = core["cd_tab"]
+    damage_tab = core.get("damage_tab") or {}
     sol_rows_raw = core["soiling_rank_rows"]
     inv_eff_per_inv = core.get("inv_eff_per_inv") or {}
 
@@ -2204,6 +2276,38 @@ def _unified_feed_rows_and_categories(
                 "is_fault_active": False,
                 "investigate": {"kind": "scb_perf", "scb_id": sid},
                 "_sort_loss_kwh": lm * 1000.0,
+            }
+        )
+
+    for drow in (damage_tab.get("scb_status") or {}).get("data") or []:
+        scb = drow.get("scb_id")
+        if not scb:
+            continue
+        ekwh = float(drow.get("total_energy_loss_kwh") or 0)
+        if ekwh <= 0:
+            continue
+        kind = str(drow.get("fault_kind") or "damage")
+        ls_raw = drow.get("last_seen_fault") or drow.get("investigation_window_end")
+        as_raw = drow.get("investigation_window_start")
+        ls_d = str(ls_raw).replace("T", " ")[:19] if ls_raw else None
+        as_d = str(as_raw).replace("T", " ")[:19] if as_raw else None
+        rows.append(
+            {
+                "id": f"damage:{scb}:{kind}",
+                "category": "damage",
+                "category_label": "ByPass Diode/Module Damage",
+                "occurred_at": str(ls_raw or f"{str(_to)[:10]} 23:59:59"),
+                "equipment_id": str(scb),
+                "equipment_level": "scb",
+                "severity_energy_kwh": round(ekwh, 4),
+                "severity_hours": None,
+                "duration_note": f"{kind.replace('_', ' ')} · ~{drow.get('module_equiv')} modules",
+                "status": kind.replace("_", " ").title(),
+                "active_since": as_d,
+                "last_seen": ls_d,
+                "is_fault_active": _fault_is_active(ls_d, _to),
+                "investigate": {"kind": "damage", "scb_id": str(scb)},
+                "_sort_loss_kwh": ekwh,
             }
         )
 
@@ -2819,6 +2923,35 @@ def get_scb_trend(
         "slope": round(float(slope), 4),
         "slope_unit": "A/min",
     }
+
+
+@router.get("/damage-page")
+def get_damage_page(
+    plant_id: str = Query(...),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Bypass diode / module damage summary + SCB table."""
+    _from, _to = _fault_date_range(date_from, date_to)
+    return _damage_tab_with_cache(db, plant_id, _from, _to)
+
+
+@router.get("/damage-timeline")
+def get_damage_timeline(
+    plant_id: str = Query(...),
+    scb_id: str = Query(...),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Investigate chart for one SCB (voltage vs reference)."""
+    _from, _to = _fault_date_range(date_from, date_to)
+    cached = _damage_tab_with_cache(db, plant_id, _from, _to)
+    tl = (cached.get("_timelines_by_scb") or {}).get(scb_id) or []
+    return {"data": tl}
 
 
 @router.get("/soiling-plant-pr")

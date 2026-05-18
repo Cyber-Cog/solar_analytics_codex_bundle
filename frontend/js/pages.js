@@ -202,9 +202,15 @@ window.DashboardPage = ({ plantId, dateFrom, dateTo, onNavigate }) => {
         setEnergy(Array.isArray(b.energy) ? b.energy : []);
         setInvTable(Array.isArray(b.inverter_performance) ? b.inverter_performance : []);
         setPowerGti(Array.isArray(b.power_vs_gti) ? b.power_vs_gti : []);
+        const hasKpis = !!(b.kpis && (
+          Number(b.kpis.energy_export_kwh) > 0 ||
+          Number(b.kpis.peak_power_kw) > 0 ||
+          Number(b.kpis.active_power_kw) > 0
+        ));
         setNoData(
           (Array.isArray(b.power_vs_gti) ? b.power_vs_gti.length : 0) === 0 &&
-          (Array.isArray(b.energy) ? b.energy.length : 0) === 0
+          (Array.isArray(b.energy) ? b.energy.length : 0) === 0 &&
+          !hasKpis
         );
         if (!ignore) setDashboardLoading(false);
       })
@@ -228,9 +234,15 @@ window.DashboardPage = ({ plantId, dateFrom, dateTo, onNavigate }) => {
           setInvTable(Array.isArray(invTableRes) ? invTableRes : []);
           setPowerGti(Array.isArray(powerGtiRes) ? powerGtiRes : []);
           setTargetGeneration(tgRes && typeof tgRes === 'object' ? tgRes : null);
+          const hasKpis = !!(kp && (
+            Number(kp.energy_export_kwh) > 0 ||
+            Number(kp.peak_power_kw) > 0 ||
+            Number(kp.active_power_kw) > 0
+          ));
           setNoData(
             (Array.isArray(powerGtiRes) ? powerGtiRes.length : 0) === 0 &&
-            (Array.isArray(energyRes) ? energyRes.length : 0) === 0
+            (Array.isArray(energyRes) ? energyRes.length : 0) === 0 &&
+            !hasKpis
           );
         })
           .finally(() => { if (!ignore) { setApiTargetGenPending(false); setDashboardLoading(false); } });

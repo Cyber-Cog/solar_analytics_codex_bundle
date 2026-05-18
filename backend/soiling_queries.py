@@ -224,6 +224,97 @@ def _build_plant_pr_by_day(
     return all_days, plant_pr, h_by_day
 
 
+def _cpr_from_daily(
+    scb_day_current: Dict[str, Dict[str, float]],
+    irr_daily: Dict[str, float],
+    scb_dc: Dict[str, float],
+) -> Dict[str, Dict[str, float]]:
+    """CPR per SCB per day = I_avg / DC_kW / max(irr_kWh_factor, eps)."""
+    eps = 0.01
+    out: Dict[str, Dict[str, float]] = defaultdict(dict)
+    for day, per in scb_day_current.items():
+        irr = float(irr_daily.get(day) or 0.0)
+        irr_factor = max(irr / 1000.0, eps)
+        for scb, iavg in per.items():
+            dc = float(scb_dc.get(scb) or 1.0)
+            if dc <= 0:
+                continue
+            out[day][scb] = float(iavg) / dc / irr_factor
+    return out
+
+
+def _smooth_cpr_daily(cpr_by_day: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str, float]]:
+    days = sorted(cpr_by_day.keys())
+    scbs = sorted({s for d in days for s in cpr_by_day[d].keys()})
+    smooth: Dict[str, Dict[str, float]] = defaultdict(dict)
+    for scb in scbs:
+        series = [cpr_by_day[d].get(scb) for d in days]
+        sm = moving_median([float(x) if x is not None else 0.0 for x in series], 3)
+        for d, v in zip(days, sm):
+            if v is not None:
+                smooth[d][scb] = float(v)
+    return smooth
+
+
+def _detect_cleaning_and_rain(
+    smooth_cpr: Dict[str, Dict[str, float]],
+) -> Tuple[List[dict], List[dict]]:
+    days = sorted(smooth_cpr.keys())
+    cleaning: List[dict] = []
+    rain: List[dict] = []
+    if len(days) < 2:
+        return cleaning, rain
+
+    scbs = sorted({s for d in days for s in smooth_cpr[d].keys()})
+    for scb in scbs:
+        for i in range(1, len(days)):
+            prev, cur = days[i - 1], days[i]
+            p = smooth_cpr[prev].get(scb)
+            c = smooth_cpr[cur].get(scb)
+            if p is None or c is None or p <= 0:
+                continue
+            jump = (c - p) / p
+            if jump >= 0.06:
+                cleaning.append(
+                    {
+                        "scb_id": scb,
+                        "date": cur,
+                        "cpr_before": round(p, 5),
+                        "cpr_after": round(c, 5),
+                        "recovery_pct": round(jump * 100.0, 2),
+                    }
+                )
+                break
+
+    for i in range(1, len(days)):
+        prev, cur = days[i - 1], days[i]
+        jumps: List[float] = []
+        for scb in scbs:
+            p = smooth_cpr[prev].get(scb)
+            c = smooth_cpr[cur].get(scb)
+            if p is None or c is None or p <= 0:
+                continue
+            jumps.append((c - p) / p)
+        if len(jumps) >= max(3, len(scbs) // 2) and all(j >= 0.035 for j in jumps):
+            rain.append(
+                {
+                    "date": cur,
+                    "scbs_recovered": len(jumps),
+                    "median_recovery_pct": round(float(statistics.median(jumps)) * 100.0, 2),
+                }
+            )
+            break
+    return cleaning, rain
+
+
+def _cpr_decline_rate(smooth_cpr: Dict[str, Dict[str, float]], scb_id: str) -> Optional[float]:
+    days = sorted(smooth_cpr.keys())
+    vals = [smooth_cpr[d].get(scb_id) for d in days if smooth_cpr[d].get(scb_id) is not None]
+    if len(vals) < 3:
+        return None
+    return linreg_slope_per_step(vals)
+
+
 def build_plant_soiling_payload(db: Session, plant_id: str, date_from: str, date_to: str) -> Dict[str, Any]:
     f_ts = f"{date_from[:10]} 00:00:00"
     t_ts = f"{date_to[:10]} 23:59:59"
@@ -276,9 +367,14 @@ def build_plant_soiling_payload(db: Session, plant_id: str, date_from: str, date
 
     top_scb_id = None
     top_scb_loss = None
+    cpr_series: List[dict] = []
+    cleaning_events: List[dict] = []
+    rain_events: List[dict] = []
+    cpr_soiling_rate_per_day: Optional[float] = None
     try:
         scb_rows = _fetch_daily_scb_current_avg(db, table, plant_id, f_ts, t_ts)
         _scb_dc = scb_dc_map(db, plant_id)
+        irr_daily = _fetch_daily_plant_irr_avg_w_m2(db, table, plant_id, f_ts, t_ts)
         scb_day_current: Dict[str, Dict[str, float]] = defaultdict(dict)
         for _day, _scb, _iavg in scb_rows:
             scb_day_current[_day][_scb] = _iavg
@@ -292,6 +388,15 @@ def build_plant_soiling_payload(db: Session, plant_id: str, date_from: str, date
         if scored_scbs:
             top_scb_id = scored_scbs[0][0]
             top_scb_loss = scored_scbs[0][1]
+
+        raw_cpr = _cpr_from_daily(scb_day_current, irr_daily, _scb_dc)
+        smooth_cpr = _smooth_cpr_daily(raw_cpr)
+        cleaning_events, rain_events = _detect_cleaning_and_rain(raw_cpr)
+        if top_scb_id:
+            cpr_soiling_rate_per_day = _cpr_decline_rate(smooth_cpr, top_scb_id)
+        for d in sorted(smooth_cpr.keys()):
+            if top_scb_id and top_scb_id in smooth_cpr[d]:
+                cpr_series.append({"date": d, "scb_id": top_scb_id, "cpr": round(smooth_cpr[d][top_scb_id], 5)})
     except Exception:
         pass
 
@@ -306,6 +411,12 @@ def build_plant_soiling_payload(db: Session, plant_id: str, date_from: str, date
         "revenue_loss_inr": revenue_loss_inr,
         "top_soiling_scb_id": top_scb_id,
         "top_soiling_scb_loss_mwh": top_scb_loss,
+        "cpr_series": cpr_series,
+        "cpr_soiling_rate_per_day": (
+            round(float(cpr_soiling_rate_per_day), 6) if cpr_soiling_rate_per_day is not None else None
+        ),
+        "cleaning_events": cleaning_events,
+        "rain_events": rain_events,
         "data_hints": {
             "inverter_energy_rows": len(inv_rows),
             "irradiance_rows": len(irr_rows),

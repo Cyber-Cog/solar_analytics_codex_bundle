@@ -56,6 +56,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
+from engine.irr_join import merge_irradiance_onto_ac
 from models import EquipmentSpec
 
 
@@ -184,19 +185,12 @@ def run_clipping_derating(
         meta["reason"] = "no inverter or irradiance data in range" if inv_rows else "no irradiance data in range"
         return [], {}, meta
 
-    # ── Build irradiance map (prefer GTI → irradiance → GHI) ──
-    df_irr = pd.DataFrame(irr_rows, columns=["timestamp", "signal", "value"])
-    df_irr["value"] = pd.to_numeric(df_irr["value"], errors="coerce")
-    df_irr = df_irr.dropna(subset=["value"])
-    df_irr["signal_rank"] = df_irr["signal"].map({"gti": 0, "irradiance": 1, "ghi": 2}).fillna(9)
-    df_irr = (
-        df_irr.sort_values(["timestamp", "signal_rank"])
-              .drop_duplicates("timestamp", keep="first")[["timestamp", "value"]]
-              .rename(columns={"value": "gti"})
-    )
-    irr_map = dict(zip(df_irr["timestamp"], df_irr["gti"]))
-    if not irr_map:
-        meta["reason"] = "irradiance map empty after cleaning"
+    # ── Irradiance long frame (merge_asof tolerates AC vs GTI clock offset on 5/15 min data) ──
+    df_irr_long = pd.DataFrame(irr_rows, columns=["timestamp", "signal", "value"])
+    df_irr_long["value"] = pd.to_numeric(df_irr_long["value"], errors="coerce")
+    df_irr_long = df_irr_long.dropna(subset=["value", "timestamp"])
+    if df_irr_long.empty:
+        meta["reason"] = "irradiance rows empty after cleaning"
         return [], {}, meta
 
     # ── Inverter frame ──────────────────────────────────────────────────
@@ -206,7 +200,14 @@ def run_clipping_derating(
     df = df.dropna(subset=["ts"])
     # Dedupe duplicates on (inverter, ts) — keep the last value
     df = df.sort_values(["inverter_id", "ts"]).drop_duplicates(["inverter_id", "ts"], keep="last").reset_index(drop=True)
-    df["gti"] = df["timestamp"].map(irr_map)
+    df = merge_irradiance_onto_ac(
+        df,
+        ts_col="timestamp",
+        df_irr=df_irr_long,
+        value_col="value",
+        priority_mode="clipping",
+        out_col="gti",
+    )
     df["gti"] = pd.to_numeric(df["gti"], errors="coerce")
     df = df[df["gti"].notna()].reset_index(drop=True)
     if df.empty:
@@ -250,12 +251,24 @@ def run_clipping_derating(
         n_days = 1
     daylight_minutes = max(1, (CD_HOUR_END - CD_HOUR_START)) * 60 * n_days
     cadence_min = max(nominal_dt_min, 0.5)
-    expected_samples = max(1.0, daylight_minutes / cadence_min)
+    cadence_expected = max(1.0, daylight_minutes / cadence_min)
+
+    pairs_in_hours = df["ac_kw"].notna() & df["gti"].notna() & in_hours
+    pairs_per_inv = pairs_in_hours.groupby(df["inverter_id"]).sum().astype(float)
 
     observed_counts = valid.groupby(df["inverter_id"]).sum().astype(int)
-    coverage_pct = (observed_counts / expected_samples * 100.0).clip(upper=100.0).round(1)
 
-    low_cov_invs = set(observed_counts.index[observed_counts / expected_samples < CD_MIN_COVERAGE_FRAC])
+    # Coverage vs theoretical daylight slots often false-fails on sparse / partial-day
+    # telemetry (e.g. fewer uploads than 7–18h at nominal cadence). Cap the denominator
+    # by how many AC↔GTI pairs we actually have in productive hours.
+    union_idx = observed_counts.index.union(pairs_per_inv.index)
+    pairs_floor = pairs_per_inv.reindex(union_idx).fillna(0.0).clip(lower=1.0)
+    expected_per_inv = np.minimum(cadence_expected, pairs_floor)
+    occ = observed_counts.reindex(union_idx).fillna(0).astype(float)
+    cov_ratio = occ / expected_per_inv.replace(0.0, np.nan)
+    cov_ratio = cov_ratio.fillna(0.0)
+    coverage_pct = (cov_ratio * 100.0).clip(upper=100.0).round(1)
+    low_cov_invs = set(cov_ratio[cov_ratio < CD_MIN_COVERAGE_FRAC].index)
 
     # ── Calibration of k (per inverter) ──
     min_active_kw = np.maximum(CD_MIN_ACTIVE_FRAC * df["rated"], CD_MIN_ACTIVE_ABS_KW)
@@ -471,8 +484,14 @@ def run_clipping_derating(
 
 def summarise_clipping_derating(inverter_status: List[dict], meta: Optional[dict] = None) -> dict:
     """KPIs for the two tabs (Clipping / Derating) and the overview tiles."""
-    clip_inverters   = [r for r in inverter_status if r.get("category") == "clip"]
-    derate_inverters = [r for r in inverter_status if r.get("category") == "derate"]
+    clip_inverters = [
+        r for r in inverter_status
+        if float(r.get("loss_power_clipping_kwh") or 0) + float(r.get("loss_current_clipping_kwh") or 0) > 0
+    ]
+    derate_inverters = [
+        r for r in inverter_status
+        if float(r.get("loss_static_derating_kwh") or 0) + float(r.get("loss_dynamic_derating_kwh") or 0) > 0
+    ]
 
     loss_power_clip   = sum(float(r.get("loss_power_clipping_kwh")   or 0) for r in inverter_status)
     loss_current_clip = sum(float(r.get("loss_current_clipping_kwh") or 0) for r in inverter_status)
@@ -482,15 +501,25 @@ def summarise_clipping_derating(inverter_status: List[dict], meta: Optional[dict
     total_derate_loss = loss_static_der + loss_dynamic_der
     total_loss        = total_clip_loss + total_derate_loss
 
-    inv_loss = sorted(
-        [{
-            "inverter_id":   r["inverter_id"],
-            "loss_kwh":      float(r.get("total_energy_loss_kwh") or 0),
-            "category":      r.get("category"),
-            "dominant_kind": r.get("dominant_kind"),
-         } for r in inverter_status if float(r.get("total_energy_loss_kwh") or 0) > 0],
-        key=lambda x: x["loss_kwh"], reverse=True,
-    )
+    inv_loss_rows = []
+    for r in inverter_status:
+        clip_loss = float(r.get("loss_power_clipping_kwh") or 0) + float(r.get("loss_current_clipping_kwh") or 0)
+        derate_loss = float(r.get("loss_static_derating_kwh") or 0) + float(r.get("loss_dynamic_derating_kwh") or 0)
+        if clip_loss > 0:
+            inv_loss_rows.append({
+                "inverter_id":   r["inverter_id"],
+                "loss_kwh":      clip_loss,
+                "category":      "clip",
+                "dominant_kind": "power_clip",
+            })
+        if derate_loss > 0:
+            inv_loss_rows.append({
+                "inverter_id":   r["inverter_id"],
+                "loss_kwh":      derate_loss,
+                "category":      "derate",
+                "dominant_kind": r.get("dominant_kind") if r.get("dominant_kind") != "power_clip" else "static_derate",
+            })
+    inv_loss = sorted(inv_loss_rows, key=lambda x: x["loss_kwh"], reverse=True)
 
     # Data-quality digest for the UI advisory banner.
     skipped = (meta or {}).get("skipped") or []

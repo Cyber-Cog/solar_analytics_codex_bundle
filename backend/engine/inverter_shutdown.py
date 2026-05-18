@@ -21,6 +21,8 @@ import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from engine.irr_join import merge_irradiance_onto_ac
+
 
 IS_IRRADIANCE_MIN = float(os.getenv("IS_IRRADIANCE_MIN", "10"))
 IS_AC_ZERO_TOL = float(os.getenv("IS_AC_ZERO_TOL", "0.01"))
@@ -140,8 +142,15 @@ def run_inverter_shutdown(
     if df_irr.empty:
         return [], []
 
-    irr_map = _pick_irradiance(df_irr)
-    df["irradiance"] = df["timestamp"].map(irr_map)
+    df = merge_irradiance_onto_ac(
+        df,
+        ts_col="timestamp",
+        df_irr=df_irr,
+        signal_col="signal",
+        value_col="irradiance",
+        priority_mode="standard",
+        out_col="irradiance",
+    )
     df["irradiance"] = pd.to_numeric(df["irradiance"], errors="coerce")
     df = df.dropna(subset=["irradiance"]).copy()
     if df.empty:
@@ -201,12 +210,19 @@ def run_inverter_shutdown(
         df["expected_ac_kw"],
     )
 
-    # Per-inverter Δt (hours) to next sample, capped (same spirit as CD engine).
+    # Per-inverter Δt (hours) to the *next* sample (forward interval), capped like grid breakdown.
     max_dt_h = float(os.getenv("IS_MAX_DT_HOURS", str(5.0 / 60.0)))
-    df["dt_h"] = df.groupby("inverter_id", sort=False)["timestamp"].diff().dt.total_seconds() / 3600.0
-    inv_median_dt = df.groupby("inverter_id", sort=False)["dt_h"].transform("median")
-    df["dt_h"] = df["dt_h"].fillna(inv_median_dt).fillna(1.0 / 60.0)
-    df["dt_h"] = df["dt_h"].clip(lower=1.0 / 3600.0, upper=max_dt_h)
+
+    def _forward_dt(series: pd.Series) -> pd.Series:
+        ts = pd.to_datetime(series, errors="coerce")
+        dt = ts.shift(-1).sub(ts).dt.total_seconds() / 3600.0
+        valid = dt[(dt > 0) & (dt <= 6.0)]
+        median = float(valid.median()) if not valid.empty else (15.0 / 60.0)
+        if not np.isfinite(median) or median <= 0:
+            median = 15.0 / 60.0
+        return dt.fillna(median).clip(lower=1.0 / 3600.0, upper=max_dt_h)
+
+    df["dt_h"] = df.groupby("inverter_id", sort=False)["timestamp"].transform(_forward_dt)
 
     df["loss_kwh_step"] = np.where(
         df["shutdown"] & (df["expected_ac_kw"] > 0),

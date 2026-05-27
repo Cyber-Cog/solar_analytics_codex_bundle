@@ -484,14 +484,8 @@ def run_clipping_derating(
 
 def summarise_clipping_derating(inverter_status: List[dict], meta: Optional[dict] = None) -> dict:
     """KPIs for the two tabs (Clipping / Derating) and the overview tiles."""
-    clip_inverters = [
-        r for r in inverter_status
-        if float(r.get("loss_power_clipping_kwh") or 0) + float(r.get("loss_current_clipping_kwh") or 0) > 0
-    ]
-    derate_inverters = [
-        r for r in inverter_status
-        if float(r.get("loss_static_derating_kwh") or 0) + float(r.get("loss_dynamic_derating_kwh") or 0) > 0
-    ]
+    clip_inverters = [r for r in inverter_status if r.get("category") == "clip"]
+    derate_inverters = [r for r in inverter_status if r.get("category") == "derate"]
 
     loss_power_clip   = sum(float(r.get("loss_power_clipping_kwh")   or 0) for r in inverter_status)
     loss_current_clip = sum(float(r.get("loss_current_clipping_kwh") or 0) for r in inverter_status)
@@ -503,21 +497,22 @@ def summarise_clipping_derating(inverter_status: List[dict], meta: Optional[dict
 
     inv_loss_rows = []
     for r in inverter_status:
+        cat = r.get("category") or ""
         clip_loss = float(r.get("loss_power_clipping_kwh") or 0) + float(r.get("loss_current_clipping_kwh") or 0)
         derate_loss = float(r.get("loss_static_derating_kwh") or 0) + float(r.get("loss_dynamic_derating_kwh") or 0)
-        if clip_loss > 0:
+        if cat == "clip" and clip_loss > 0:
             inv_loss_rows.append({
                 "inverter_id":   r["inverter_id"],
                 "loss_kwh":      clip_loss,
                 "category":      "clip",
-                "dominant_kind": "power_clip",
+                "dominant_kind": r.get("dominant_kind") or "power_clip",
             })
-        if derate_loss > 0:
+        elif cat == "derate" and derate_loss > 0:
             inv_loss_rows.append({
                 "inverter_id":   r["inverter_id"],
                 "loss_kwh":      derate_loss,
                 "category":      "derate",
-                "dominant_kind": r.get("dominant_kind") if r.get("dominant_kind") != "power_clip" else "static_derate",
+                "dominant_kind": r.get("dominant_kind") or "static_derate",
             })
     inv_loss = sorted(inv_loss_rows, key=lambda x: x["loss_kwh"], reverse=True)
 

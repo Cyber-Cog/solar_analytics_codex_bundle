@@ -627,6 +627,11 @@ function App() {
         setRouteLoadErr('Analytics Lab module failed to initialize. Try refreshing.');
         return;
       }
+      if (page === 'Loss Analysis' && !window.LossAnalysisPage) {
+        console.error('[solar-error] LossAnalysis module loaded but window.LossAnalysisPage missing');
+        setRouteLoadErr('Loss Analysis module failed to initialize. Try refreshing.');
+        return;
+      }
 
       try {
         if (localStorage.getItem('solar_perf_log') === '1' && performance.now) {
@@ -659,7 +664,9 @@ function App() {
         routeReady && !routeLoadErr && page === 'Dashboard' && window.DashboardPage && h(window.DashboardPage, { plantId, dateFrom, dateTo, onNavigate: handlePageChange }),
         routeReady && !routeLoadErr && page === 'Fault Diagnostics' && window.FaultPage && h(window.FaultPage, { plantId, dateFrom, dateTo, faultSub, onNavigateFaultSub: handleNavigateFaultSub }),
         routeReady && !routeLoadErr && page === 'Analytics Lab' && window.AnalyticsPage && h(window.AnalyticsPage, { plantId, dateFrom, dateTo, onNavigate: handlePageChange }),
-        routeReady && !routeLoadErr && page === 'Loss Analysis' && window.LossAnalysisPage && h(window.LossAnalysisPage, { plantId, dateFrom, dateTo }),
+        routeReady && !routeLoadErr && page === 'Loss Analysis' && window.LossAnalysisPage && (window.LossAnalysisBoundary
+          ? h(window.LossAnalysisBoundary, null, h(window.LossAnalysisPage, { plantId, dateFrom, dateTo }))
+          : h(window.LossAnalysisPage, { plantId, dateFrom, dateTo })),
         routeReady && !routeLoadErr && page === 'Reports' && window.ReportsPage && h(window.ReportsPage, { plantId, plants, dateFrom, dateTo }),
         routeReady && !routeLoadErr && page === 'Guidebook' && window.GuidebookPage && h(window.GuidebookPage, null),
         routeReady && !routeLoadErr && page === 'Metadata' && window.MetadataPage && h(window.MetadataPage, { plantId }),

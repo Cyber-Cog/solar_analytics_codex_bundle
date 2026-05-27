@@ -1,4 +1,4 @@
-console.info('[solar-trace] fault_page.js starting initialization');
+console.info('[solar-trace] fault_page.js DS-HEATMAP-V5 — status from telemetry + persistent DS fault');
 const { useState, useEffect, useCallback, useMemo, useRef } = React;
 // Recharts explicitly removed during ECharts migration
 const { Card, Spinner, Badge, KpiCard, DataTable } = window;
@@ -8,12 +8,86 @@ if (!Card || !Spinner || !DataTable) {
 }
 
 function parseScbSlotInfo(scbId) {
-  const match = String(scbId || '').match(/^SCB-([^-]+)-(\d+)$/i);
-  if (!match) return null;
+  const s = String(scbId || '').trim();
+  // Legacy / compact: SCB-<invSuffix>-<slot> e.g. SCB-01-02 → INV-01, slot 2
+  let m = s.match(/^SCB-([^-]+)-(\d+)$/i);
+  if (m) {
+    return {
+      invKey: `INV-${m[1]}`,
+      invSuffix: m[1],
+      slot: Number(m[2]),
+    };
+  }
+  // Common in ingest / demo: <inverter>-SCB-<slot> e.g. INV-01-SCB-02
+  m = s.match(/^(.+)-SCB-(\d+)$/i);
+  if (m) {
+    const invRaw = m[1].trim();
+    const slot = Number(m[2]);
+    if (!invRaw || !Number.isFinite(slot) || slot <= 0) return null;
+    const invKey = /^INV-/i.test(invRaw) ? invRaw : `INV-${invRaw}`;
+    const invSuffix = invKey.replace(/^INV-/i, '');
+    return { invKey, invSuffix, slot };
+  }
+  return null;
+}
+
+/** DS plant heatmap — four states only (legend + cells must match). */
+const DS_HEAT_COLOR = {
+  noFault: '#22c55e',
+  fault: '#dc2626',
+  badComm: '#9ca3af',
+  spare: '#ffffff',
+};
+const DS_HEAT_SPARE_BORDER = '1px solid #e2e8f0';
+
+function dsHeatmapSpareCellStyle(base) {
   return {
-    invKey: `INV-${match[1]}`,
-    invSuffix: match[1],
-    slot: Number(match[2]),
+    ...base,
+    background: DS_HEAT_COLOR.spare,
+    borderRight: DS_HEAT_SPARE_BORDER,
+    borderBottom: DS_HEAT_SPARE_BORDER,
+    boxShadow: 'inset 0 0 0 1px #f1f5f9',
+    cursor: 'default',
+  };
+}
+
+/**
+ * Resolve heatmap cell state — must match backend heatmap_status + legend.
+ * no_fault | fault | bad_data | comm_issue | spare
+ */
+function dsHeatmapCellStatus(archCell, heatRow, isConstantBad) {
+  if (!archCell || archCell.spare_flag || archCell.inferred_spare) return 'spare';
+  const apiStatus = heatRow && heatRow.heatmap_status;
+  if (apiStatus === 'no_fault' || apiStatus === 'fault' || apiStatus === 'bad_data' || apiStatus === 'comm_issue') {
+    return apiStatus;
+  }
+  if (isConstantBad) return 'bad_data';
+  if (!heatRow) return 'comm_issue';
+  const ms = Number(heatRow.missing_strings ?? heatRow.range_min_missing_strings ?? 0);
+  if (ms > 0) return 'fault';
+  if (heatRow.has_telemetry === false) return 'comm_issue';
+  return 'no_fault';
+}
+
+function dsHeatmapLegendSwatch(color, isSpare) {
+  const common = {
+    width: 12,
+    height: 12,
+    borderRadius: 3,
+    display: 'inline-block',
+  };
+  if (isSpare) {
+    return {
+      ...common,
+      background: DS_HEAT_COLOR.spare,
+      border: DS_HEAT_SPARE_BORDER,
+      boxShadow: 'inset 0 0 0 1px #f1f5f9',
+    };
+  }
+  return {
+    ...common,
+    background: color,
+    boxShadow: 'inset 0 0 0 1px rgba(15,23,42,0.12)',
   };
 }
 
@@ -100,6 +174,58 @@ const CD_KIND_COLOR = {
   normal: '#10b981',
 };
 
+/** White investigate modals — do not use var(--panel); app dark theme + ECharts break CSS vars. */
+const FAULT_MODAL_OVERLAY_STYLE = {
+  position: 'fixed', inset: 0, background: 'rgba(15, 23, 42, 0.45)',
+  display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 99999,
+};
+const FAULT_MODAL_PANEL_STYLE = {
+  background: '#ffffff', color: '#0f172a', borderRadius: 12, padding: 24,
+  boxShadow: '0 20px 60px rgba(15, 23, 42, 0.18)',
+};
+const FAULT_CHART_TOOLTIP_BASE = {
+  trigger: 'axis',
+  confine: true,
+  backgroundColor: '#ffffff',
+  borderColor: '#e2e8f0',
+  textStyle: { color: '#1e293b', fontSize: 12 },
+};
+const FAULT_CHART_AXIS_LIGHT = {
+  axisLabel: { color: '#64748b', fontSize: 10 },
+  axisLine: { lineStyle: { color: '#e2e8f0' } },
+  splitLine: { lineStyle: { type: 'dashed', color: '#e2e8f0' } },
+};
+
+function cdInverterCategory(row) {
+  if (row.category === 'clip' || row.category === 'derate') return row.category;
+  const dk = row.dominant_kind || '';
+  if (dk === 'power_clip' || dk === 'current_clip') return 'clip';
+  if (dk === 'static_derate' || dk === 'dynamic_derate') return 'derate';
+  return '';
+}
+
+function faultSeriesValue(p) {
+  if (!p) return null;
+  const v = p.value;
+  if (v != null && typeof v !== 'object') return v;
+  if (Array.isArray(p.data)) return p.data[p.data.length - 1];
+  if (p.data != null && typeof p.data !== 'object') return p.data;
+  return null;
+}
+
+function faultAxisTooltipFormatter(unit) {
+  return (params) => {
+    if (!params || !params.length) return '';
+    let html = `<div style="font-weight:600;margin-bottom:4px;color:#0f172a">${params[0].axisValue || ''}</div>`;
+    params.forEach((p) => {
+      const raw = faultSeriesValue(p);
+      const val = raw == null || !Number.isFinite(Number(raw)) ? '—' : Number(raw).toFixed(2);
+      html += `<div style="color:#334155">${p.marker} ${p.seriesName}: <b style="color:#0f172a">${val}${unit}</b></div>`;
+    });
+    return html;
+  };
+}
+
 window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigateFaultSub }) => {
   const h = React.createElement;
   /** Single source of truth with URL hash — avoids drift vs sidebar selection. */
@@ -111,6 +237,7 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
   }, [onNavigateFaultSub]);
   const [loading, setLoading] = useState(false);
   const [scbStatus, setScbStatus] = useState([]);
+  const [heatmapByScb, setHeatmapByScb] = useState([]);
   const [archList, setArchList] = useState([]);
   const [dsSummary, setDsSummary] = useState(null);
   const [filterSummary, setFilterSummary] = useState(null);
@@ -233,47 +360,41 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
     setDataLoading(true);
     setDsLoadError(false);
 
-    window.SolarAPI.Metadata.architectureCompact(plantId)
-      .then(arch => { if (dsReqSeqRef.current === reqId) setArchList(arch || []); })
-      .catch(() => { if (dsReqSeqRef.current === reqId) setArchList([]); });
-
-    const fetchStatus = async () => {
+    const fetchCore = async () => {
       try {
-        const res = await window.SolarAPI.Faults.dsScbStatus(plantId, dateFrom, dateTo);
+        const [arch, res] = await Promise.all([
+          window.SolarAPI.Metadata.architectureCompact(plantId).catch(() => []),
+          window.SolarAPI.Faults.dsScbStatus(plantId, dateFrom, dateTo),
+        ]);
         if (dsReqSeqRef.current !== reqId) return;
+        setArchList(arch || []);
         setScbStatus(res.data || []);
+        setHeatmapByScb(res.heatmap_by_scb || res.data || []);
         setDsLoadError(false);
       } catch (e) {
-        // one retry to absorb transient network/backend hiccups
-        try {
-          await new Promise(r => setTimeout(r, 450));
-          const retryRes = await window.SolarAPI.Faults.dsScbStatus(plantId, dateFrom, dateTo);
-          if (dsReqSeqRef.current !== reqId) return;
-          setScbStatus(retryRes.data || []);
-          setDsLoadError(false);
-        } catch (e2) {
-          if (dsReqSeqRef.current !== reqId) return;
-          console.error(e2);
-          setScbStatus([]);
-          setDsLoadError(true);
-        }
+        if (dsReqSeqRef.current !== reqId) return;
+        console.error(e);
+        setArchList([]);
+        setScbStatus([]);
+        setHeatmapByScb([]);
+        setDsLoadError(true);
       } finally {
         if (dsReqSeqRef.current === reqId) setDataLoading(false);
       }
     };
-    fetchStatus();
+    fetchCore();
 
+    // Non-blocking: KPIs, filter notice, reviews (can be slow on long ranges).
     window.SolarAPI.Faults.dsSummary(plantId, dateFrom, dateTo)
-      .then(data => { if (dsReqSeqRef.current === reqId) setDsSummary(data); })
+      .then((data) => { if (dsReqSeqRef.current === reqId) setDsSummary(data); })
       .catch(() => { if (dsReqSeqRef.current === reqId) setDsSummary(null); });
 
     window.SolarAPI.Faults.dsFilterSummary(plantId, dateFrom, dateTo)
-      .then(data => { if (dsReqSeqRef.current === reqId) setFilterSummary(data); })
+      .then((data) => { if (dsReqSeqRef.current === reqId) setFilterSummary(data); })
       .catch(() => { if (dsReqSeqRef.current === reqId) setFilterSummary(null); });
 
-    // Load saved reviews for this plant + date range
     window.SolarAPI.Faults.getReviews(plantId, dateFrom, dateTo)
-      .then(data => {
+      .then((data) => {
         if (dsReqSeqRef.current !== reqId) return;
         setReviews(data || {});
         setLocalEdits({});
@@ -283,11 +404,14 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
 
   useEffect(loadData, [loadData]);
 
-  // Prefetch raw-derived fault tabs (PL / IS / GB) so switching tabs hits warm server + memory cache.
+  // Prefetch other tabs after DS core loads (avoid competing with ds-scb-status on first paint).
   useEffect(() => {
-    if (!plantId || !dateFrom || !dateTo) return;
-    window.SolarAPI.Faults.runtimeTabsBundle(plantId, dateFrom, dateTo).catch(() => {});
-  }, [plantId, dateFrom, dateTo]);
+    if (!plantId || !dateFrom || !dateTo || dataLoading) return;
+    const t = setTimeout(() => {
+      window.SolarAPI.Faults.runtimeTabsBundle(plantId, dateFrom, dateTo).catch(() => {});
+    }, 2500);
+    return () => clearTimeout(t);
+  }, [plantId, dateFrom, dateTo, dataLoading]);
 
   useEffect(() => {
     if (subView !== 'pl' || !plantId) return;
@@ -499,9 +623,15 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
 
   const scbStatusById = useMemo(() => {
     const m = {};
-    (scbStatus || []).forEach(d => { m[d.scb_id] = d; });
+    (scbStatus || []).forEach((d) => { m[d.scb_id] = d; });
     return m;
   }, [scbStatus]);
+
+  const heatmapByScbId = useMemo(() => {
+    const m = {};
+    (heatmapByScb || []).forEach((d) => { if (d && d.scb_id) m[d.scb_id] = d; });
+    return m;
+  }, [heatmapByScb]);
   const archByInv = useMemo(() => {
     const byInv = {};
     (archList || []).forEach(a => {
@@ -558,10 +688,21 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
   const maxScbs = useMemo(() => {
     let m = 0;
     if (archByInv && Object.keys(archByInv).length) {
-      Object.values(archByInv).forEach(arr => { if (arr.length > m) m = arr.length; });
+      Object.values(archByInv).forEach((arr) => {
+        if (arr.length > m) m = arr.length;
+      });
+    }
+    if (m === 0 && inverters.length && (allScbs || []).length) {
+      const cnt = {};
+      (allScbs || []).forEach((row) => {
+        const inv = row.inverter_id
+          || (row.scb_id && row.scb_id.includes('-') ? row.scb_id.split('-SCB-')[0] : null);
+        if (inv) cnt[inv] = (cnt[inv] || 0) + 1;
+      });
+      inverters.forEach((inv) => { m = Math.max(m, cnt[inv] || 0); });
     }
     return m;
-  }, [archByInv]);
+  }, [archByInv, inverters, allScbs]);
 
   const invMap = {};
   activeFaults.forEach(d => {
@@ -1135,7 +1276,7 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
       h(Spinner, { size: 14 }), 'Loading fault diagnostics...'
     ),
 
-    subView === 'ds' && !dataLoading && scbStatus.length === 0 && h('div', { className: 'empty-state', style: { minHeight: 320, background: 'var(--panel)', borderRadius: 12, border: '1px solid var(--line)' } },
+    subView === 'ds' && !dataLoading && scbStatus.length === 0 && heatmapByScb.length === 0 && (archList || []).length === 0 && h('div', { className: 'empty-state', style: { minHeight: 320, background: 'var(--panel)', borderRadius: 12, border: '1px solid var(--line)' } },
       h('div', { style: { fontSize: 18, fontWeight: 700, marginBottom: 10 } }, dsLoadError ? 'Failed to load fault diagnostics' : 'No data for selected date range'),
       h('div', { style: { fontSize: 13, color: 'var(--text-muted)', marginBottom: 8 } }, `Error: ${dsLoadError ? 'DS_FETCH_ERROR' : 'DS_NO_DATA'}`),
       h('div', { style: { fontSize: 13, color: 'var(--text-muted)', marginBottom: 4 } }, `Plant: ${plantId || '-'}`),
@@ -1365,14 +1506,8 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
     (subView === 'clip' || subView === 'derate') && (() => {
       const isClip = subView === 'clip';
       const cat = isClip ? 'clip' : 'derate';
-      // Only show inverters whose DOMINANT behaviour matches the active tab.
-      // An inverter with mostly derating loss but a tiny clip loss stays in the Derate tab.
-      const rowsForTab = cdRows.filter((r) => {
-        const dk = r.dominant_kind || '';
-        return isClip
-          ? (dk === 'power_clip' || dk === 'current_clip')
-          : (dk === 'static_derate' || dk === 'dynamic_derate');
-      });
+      // Tab split uses engine `category` (clip vs derate), not incidental clip kWh on derate inverters.
+      const rowsForTab = cdRows.filter((r) => cdInverterCategory(r) === cat);
       const invLossForTab = (cdSummary?.inverter_loss || []).filter((r) => r.category === cat);
       const dq = cdSummary?.data_quality || {};
 
@@ -1502,17 +1637,17 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
     // ── Investigate modal (shared between Clipping & Derating tabs) ──
     (subView === 'clip' || subView === 'derate') && selectedCdInverter && ReactDOM.createPortal(
         h('div', {
-          className: 'modal-overlay',
-          style: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 99999, display: 'flex', alignItems: 'center', justifyContent: 'center' },
+          className: 'modal-overlay fault-investigate-overlay',
+          style: FAULT_MODAL_OVERLAY_STYLE,
           onClick: (e) => { if (e.target === e.currentTarget) { setSelectedCdKind(null); setSelectedCdInverter(null); } }
         },
           h('div', {
-            className: 'modal-content',
+            className: 'modal-content fault-investigate-panel',
             onClick: (e) => e.stopPropagation(),
-            style: { background: 'var(--panel)', borderRadius: 12, width: 'min(1100px, 96vw)', maxHeight: '90vh', overflow: 'auto', padding: 24 }
+            style: { ...FAULT_MODAL_PANEL_STYLE, width: 'min(1100px, 96vw)', maxHeight: '90vh', overflow: 'auto' }
           },
             h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 } },
-              h('h3', { style: { margin: 0 } },
+              h('h3', { style: { margin: 0, color: '#0f172a' } },
                 selectedCdKind === 'clip' ? `Clipping: ${selectedCdInverter}` : `Derating: ${selectedCdInverter}`
               ),
               h('button', { className: 'btn btn-outline', onClick: () => { setSelectedCdKind(null); setSelectedCdInverter(null); } }, 'Close')
@@ -1557,19 +1692,16 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
                 : selectedCdKind === 'derate' ? derateLegend
                   : clipLegend;
               const cdOption = {
-                backgroundColor: 'transparent',
+                backgroundColor: '#ffffff',
                 tooltip: {
-                  trigger: 'axis',
-                  confine: true,
-                  backgroundColor: 'var(--panel)',
-                  borderColor: 'var(--line)',
-                  textStyle: { color: 'var(--text)', fontSize: 12 },
+                  ...FAULT_CHART_TOOLTIP_BASE,
                   axisPointer: { type: 'line', lineStyle: { type: 'dashed', color: '#94a3b8' } },
                   formatter: (params) => {
                     if (!params || !params.length) return '';
-                    const head = `<div style="font-weight:600;margin-bottom:4px">${params[0].axisValue || ''}</div>`;
+                    const head = `<div style="font-weight:600;margin-bottom:4px;color:#0f172a">${params[0].axisValue || ''}</div>`;
                     const lines = params.map((p) => {
-                      const val = p.value == null ? '—' : Number(p.value).toFixed(2);
+                      const raw = faultSeriesValue(p);
+                      const val = raw == null || !Number.isFinite(Number(raw)) ? '—' : Number(raw).toFixed(2);
                       const unit = p.seriesName.includes('GTI') || p.seriesName.includes('W/m²') ? ' W/m²' : ' kW';
                       return `<div>${p.marker} ${p.seriesName}: <b>${val}${unit}</b></div>`;
                     });
@@ -2081,17 +2213,17 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
 
     subView === 'damage' && selectedDamageScb && ReactDOM.createPortal(
       h('div', {
-        className: 'modal-overlay',
-        style: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 99999 },
+        className: 'modal-overlay fault-investigate-overlay',
+        style: FAULT_MODAL_OVERLAY_STYLE,
         onClick: (e) => { if (e.target === e.currentTarget) setSelectedDamageScb(null); },
       },
         h('div', {
-          className: 'modal-content',
+          className: 'modal-content fault-investigate-panel',
           onClick: (e) => e.stopPropagation(),
-          style: { background: 'var(--panel)', borderRadius: 12, padding: 24, width: 'min(1060px, 96vw)', maxHeight: '90vh', overflow: 'auto' },
+          style: { ...FAULT_MODAL_PANEL_STYLE, width: 'min(1060px, 96vw)', maxHeight: '90vh', overflow: 'auto' },
         },
           h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 } },
-            h('h3', { style: { margin: 0 } }, `Bypass / Module Damage: ${selectedDamageScb}`),
+            h('h3', { style: { margin: 0, color: '#0f172a' } }, `Bypass / Module Damage: ${selectedDamageScb}`),
             h('button', { className: 'btn btn-outline', onClick: () => setSelectedDamageScb(null) }, 'Close'),
           ),
           h('div', { style: { color: 'var(--text-muted)', fontSize: 13, marginBottom: 12 } },
@@ -2135,11 +2267,7 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
               option: {
                 backgroundColor: 'transparent',
                 tooltip: {
-                  trigger: 'axis',
-                  confine: true,
-                  backgroundColor: 'var(--panel)',
-                  borderColor: 'var(--line)',
-                  textStyle: { color: 'var(--text)', fontSize: 12 },
+                  ...FAULT_CHART_TOOLTIP_BASE,
                   formatter: (params) => {
                     const label = params[0]?.axisValue || '';
                     let html = `<div style="font-weight:600;margin-bottom:4px">${label}</div>`;
@@ -2203,7 +2331,7 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
       document.body,
     ),
 
-    scbStatus.length > 0 && subView === 'ds' && h('div', { style: { display: 'grid', gap: 16, gridTemplateColumns: '1fr' } },
+    subView === 'ds' && !dataLoading && ((archList || []).length > 0 || heatmapByScb.length > 0 || scbStatus.length > 0) && h('div', { style: { display: 'grid', gap: 16, gridTemplateColumns: '1fr' } },
       filterSummary && (filterSummary.total_filtered > 0) && h('div', {
         style: {
           padding: '10px 16px', borderRadius: 10, fontSize: 13,
@@ -2283,21 +2411,25 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
           h('div', { style: { display: 'flex', gap: 15, marginBottom: 15, fontSize: 12, alignItems: 'center', color: 'var(--text-soft)', flexWrap: 'wrap', flexShrink: 0 } },
             h('strong', { style: { color: 'var(--text)' } }, 'Legend: '),
             h('div', { style: { display: 'flex', alignItems: 'center', gap: 5 } },
-              h('span', { style: { width: 12, height: 12, background: '#24b36b', borderRadius: 3, display: 'inline-block', boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.14)' } }), 'No Fault'),
+              h('span', { style: dsHeatmapLegendSwatch(DS_HEAT_COLOR.noFault) }), 'No Fault'),
             h('div', { style: { display: 'flex', alignItems: 'center', gap: 5 } },
-              h('span', { style: { width: 12, height: 12, background: '#d99a33', borderRadius: 3, display: 'inline-block', boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.14)' } }), '1–2 Disconnected Strings'),
+              h('span', { style: dsHeatmapLegendSwatch(DS_HEAT_COLOR.fault) }), 'Fault'),
             h('div', { style: { display: 'flex', alignItems: 'center', gap: 5 } },
-              h('span', { style: { width: 12, height: 12, background: '#de5a5a', borderRadius: 3, display: 'inline-block', boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.14)' } }), '>2 Disconnected Strings'),
+              h('span', { style: dsHeatmapLegendSwatch(DS_HEAT_COLOR.badComm) }), 'Bad Data/Communication Issue'),
             h('div', { style: { display: 'flex', alignItems: 'center', gap: 5 } },
-              h('span', { style: { width: 12, height: 12, background: '#b91c1c', borderRadius: 3, display: 'inline-block', boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.14)' } }), 'Bad data'),
-            h('div', { style: { display: 'flex', alignItems: 'center', gap: 5 } },
-              h('span', { style: { width: 12, height: 12, background: '#172433', borderRadius: 3, display: 'inline-block', boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.14)' } }), 'Normal / Night'),
-            h('div', { style: { display: 'flex', alignItems: 'center', gap: 5 } },
-              h('span', { style: { width: 12, height: 12, background: '#0f172a', borderRadius: 3, display: 'inline-block', boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.2)' } }), 'No communication'),
-            h('div', { style: { display: 'flex', alignItems: 'center', gap: 5 } },
-              h('span', { style: { width: 12, height: 12, background: '#64748b', borderRadius: 3, display: 'inline-block', boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.14)' } }), 'Spare')
+              h('span', { style: dsHeatmapLegendSwatch(DS_HEAT_COLOR.spare, true) }), 'Spare'),
           ),
-          h('table', { style: { borderCollapse: 'separate', borderSpacing: 0, fontSize: 11, minWidth: 'max-content' } },
+          inverters.length === 0 && h('div', { style: { padding: '20px 12px', fontSize: 13, color: 'var(--text-muted)' } },
+            'No inverter/SCB telemetry for this plant and date range — heatmap needs DS status rows. Try another range or confirm raw SCB data is loaded.',
+          ),
+          inverters.length > 0 && maxScbs === 0 && h('div', { style: { padding: '20px 12px', fontSize: 13, color: 'var(--text-muted)' } },
+            'Could not place SCBs on the grid (no parseable SCB IDs in plant architecture). Supported patterns: ',
+            h('code', { style: { fontSize: 12 } }, 'SCB-<inv>-<slot>'),
+            ' or ',
+            h('code', { style: { fontSize: 12 } }, 'INV-xx-SCB-<slot>'),
+            '. Update metadata architecture or ID naming.',
+          ),
+          inverters.length > 0 && maxScbs > 0 && h('table', { style: { borderCollapse: 'separate', borderSpacing: 0, fontSize: 11, minWidth: 'max-content' } },
             h('thead', { style: { position: 'sticky', top: 0, zIndex: 4, background: '#0d1520' } }, h('tr', null,
               h('th', { style: { padding: '6px 10px', background: '#132131', color: 'var(--text-soft)', borderRight: '1px solid rgba(255,255,255,0.08)', borderBottom: '1px solid rgba(255,255,255,0.08)', position: 'sticky', left: 0, zIndex: 5, textAlign: 'left' } }, 'SCBs'),
               inverters.map(inv => h('th', { key: inv, style: { padding: '6px 8px', borderRight: '1px solid rgba(255,255,255,0.06)', borderBottom: '1px solid rgba(255,255,255,0.08)', minWidth: 42, color: 'var(--text-soft)', background: '#0f1b29', fontWeight: 700 } }, inv.replace('INV-', '')))
@@ -2308,18 +2440,29 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
                   h('td', { style: { padding: '4px 10px', borderRight: '1px solid rgba(255,255,255,0.08)', borderBottom: '1px solid rgba(255,255,255,0.06)', fontWeight: 700, color: 'var(--text-soft)', background: i % 2 === 0 ? '#132131' : '#101d2b', position: 'sticky', left: 0, zIndex: 2, textAlign: 'left', whiteSpace: 'nowrap' } }, `SCB ${String(i + 1).padStart(2, '0')}`),
                   inverters.map(inv => {
                     const archCell = archByInv && archByInv[inv] && archByInv[inv][i];
+                    const cellBase = {
+                      borderRight: '1px solid rgba(255,255,255,0.06)',
+                      borderBottom: '1px solid rgba(255,255,255,0.06)',
+                      minWidth: 24,
+                      height: 28,
+                    };
                     if (!archCell) {
                       return h('td', {
                         key: inv,
-                        style: { background: '#0d1520', borderRight: '1px solid rgba(255,255,255,0.06)', borderBottom: '1px solid rgba(255,255,255,0.06)', minWidth: 24, height: 28 }
+                        style: dsHeatmapSpareCellStyle(cellBase),
+                        title: 'No SCB slot at this position (not used on this inverter).',
                       }, '');
                     }
-                    const data = scbStatusById[archCell.scb_id];
+                    const heatRow = heatmapByScbId[archCell.scb_id];
+                    const statusRow = heatRow || scbStatusById[archCell.scb_id];
                     const isConstantBad = constantBadScbSet.has(archCell.scb_id);
+                    const cellStatus = dsHeatmapCellStatus(archCell, heatRow, isConstantBad);
                     const stringCount = archCell?.strings_per_scb != null ? archCell.strings_per_scb : '—';
                     const moduleWp = deriveModuleWp(archCell);
-                    // Min(missing_strings) over range = same value everywhere (table, heatmap, summary)
-                    const disconnectedStrings = Number(data?.missing_strings ?? data?.range_min_missing_strings ?? 0);
+                    const disconnectedStrings = Number(
+                      heatRow?.missing_strings ?? heatRow?.range_min_missing_strings
+                      ?? statusRow?.missing_strings ?? statusRow?.range_min_missing_strings ?? 0,
+                    );
                     const hoverLines = [
                       `SCB: ${archCell.scb_id}`,
                       `Inverter: ${archCell.inverter_id || inv}`,
@@ -2327,38 +2470,45 @@ window.FaultPage = ({ plantId, dateFrom: pFrom, dateTo: pTo, faultSub, onNavigat
                       `Strings Connected: ${stringCount}`,
                       `Module Wp: ${moduleWp != null && Number.isFinite(moduleWp) ? moduleWp : '—'}`,
                     ];
-                    if (archCell.spare_flag || archCell.inferred_spare) {
+                    if (cellStatus === 'spare') {
                       return h('td', {
                         key: inv,
-                        style: { background: '#64748b', borderRight: '1px solid rgba(255,255,255,0.06)', borderBottom: '1px solid rgba(255,255,255,0.06)', minWidth: 24, height: 28, cursor: 'default' },
+                        style: dsHeatmapSpareCellStyle(cellBase),
                         title: [...hoverLines, archCell.inferred_spare ? 'Spare / inferred from architecture gap' : 'Spare'].join('\n')
                       }, '');
                     }
-                    if (isConstantBad) {
+                    if (cellStatus === 'bad_data') {
                       return h('td', {
                         key: inv,
-                        style: { background: '#b91c1c', borderRight: '1px solid rgba(255,255,255,0.06)', borderBottom: '1px solid rgba(255,255,255,0.06)', minWidth: 24, height: 28, cursor: 'default' },
+                        style: { ...cellBase, background: DS_HEAT_COLOR.badComm, cursor: 'default' },
                         title: [...hoverLines, 'Bad data: flat/constant signal detected (>120 equal timestamps in a day). DS logic excluded.'].join('\n')
                       }, '');
                     }
-                    if (!data) {
+                    if (cellStatus === 'comm_issue') {
                       return h('td', {
                         key: inv,
-                        style: { background: '#0f172a', borderRight: '1px solid rgba(255,255,255,0.06)', borderBottom: '1px solid rgba(255,255,255,0.06)', minWidth: 24, height: 28 },
-                        title: [...hoverLines, 'No communication'].join('\n')
+                        style: { ...cellBase, background: DS_HEAT_COLOR.badComm, cursor: 'default' },
+                        title: [...hoverLines, 'Bad Data/Communication Issue: no current telemetry in this date range.'].join('\n')
                       }, '');
                     }
-                    const isFault = disconnectedStrings > 0;
-                    let bg = '#24b36b';
-                    let textColor = '#f8fafc';
-                    if (!isFault) bg = (data.expected_current === 0) ? '#172433' : '#24b36b';
-                    else if (disconnectedStrings > 2) bg = '#de5a5a';
-                    else bg = '#d99a33';
+                    const isFault = cellStatus === 'fault' || disconnectedStrings > 0;
+                    const bg = isFault ? DS_HEAT_COLOR.fault : DS_HEAT_COLOR.noFault;
+                    const textColor = isFault ? '#ffffff' : '#052e16';
+                    const hoverExtra = !isFault
+                      ? 'No Fault: telemetry present and no persistent disconnected strings in range.'
+                      : '';
                     return h('td', {
                       key: inv,
-                      style: { background: bg, borderRight: '1px solid rgba(255,255,255,0.06)', borderBottom: '1px solid rgba(255,255,255,0.06)', textAlign: 'center', color: textColor, fontWeight: 800, cursor: 'pointer', minWidth: 24, height: 28 },
-                      title: hoverLines.join('\n'),
-                      onClick: () => setSelectedFault(data.scb_id)
+                      style: {
+                        ...cellBase,
+                        background: bg,
+                        textAlign: 'center',
+                        color: textColor,
+                        fontWeight: isFault ? 800 : 600,
+                        cursor: isFault ? 'pointer' : 'default',
+                      },
+                      title: [...hoverLines, hoverExtra].filter(Boolean).join('\n'),
+                      onClick: isFault ? () => setSelectedFault(archCell.scb_id) : undefined,
                     }, isFault ? disconnectedStrings : '');
                   })
                 )

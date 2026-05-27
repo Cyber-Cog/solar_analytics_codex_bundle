@@ -129,6 +129,10 @@ def build_equipment_specs(cfg: Optional[DemoConfig] = None) -> Tuple[List[dict],
             "vmp": VMP_PER_MODULE,
             "pmax": 0.55,
             "target_efficiency": 98.5,
+            "gamma_stc": 0.34,
+            "degradation_year1_pct": 2.0,
+            "degradation_year2_pct": 0.45,
+            "degradation_annual_pct": 0.45,
         }
     ]
     for inv, dc_kwp in sorted(inv_dc.items()):
@@ -144,6 +148,9 @@ def build_equipment_specs(cfg: Optional[DemoConfig] = None) -> Tuple[List[dict],
                 "dc_capacity_kwp": round(dc_kwp, 3),
                 "rated_efficiency": 98.0,
                 "target_efficiency": 98.5,
+                # Loss Analysis waterfall (inverter-level % of expected energy)
+                "degradation_loss_pct": 1.2,
+                "temp_coefficient_per_deg": 0.004,
             }
         )
     plant_mwp = sum(inv_dc.values()) / 1000.0
@@ -157,6 +164,17 @@ def _iter_timestamps(d0: datetime, d1: datetime, step_min: int) -> Iterator[date
     while cur < end:
         yield cur
         cur += delta
+
+
+def _wms_temps_c(ts: datetime, gti: float, rng: np.random.Generator) -> Tuple[float, float]:
+    """Plant-level ambient and module temperature for Loss Analysis WMS KPIs."""
+    if gti < 10.0:
+        return 0.0, 0.0
+    h = ts.hour + ts.minute / 60.0
+    x = max(0.0, min(1.0, (h - 6.0) / 13.0))
+    ambient = 22.0 + 11.0 * np.sin(np.pi * x) ** 1.1 + rng.normal(0.0, 0.6)
+    module = ambient + 9.0 + rng.normal(0.0, 0.8)
+    return float(max(5.0, ambient)), float(max(ambient + 2.0, module))
 
 
 def _solar_gti(ts: datetime, rng: np.random.Generator) -> float:
@@ -351,6 +369,27 @@ def build_raw_dataframe(cfg: Optional[DemoConfig] = None) -> pd.DataFrame:
                 "value": irr,
             }
         )
+        amb_c, mod_c = _wms_temps_c(ts, gti, rng)
+        if amb_c > 0:
+            records.append(
+                {
+                    "timestamp": ts_str,
+                    "equipment_level": "plant",
+                    "equipment_id": cfg.plant_id,
+                    "signal": "ambient_temp",
+                    "value": amb_c,
+                }
+            )
+        if mod_c > 0:
+            records.append(
+                {
+                    "timestamp": ts_str,
+                    "equipment_level": "plant",
+                    "equipment_id": cfg.plant_id,
+                    "signal": "module_temp",
+                    "value": mod_c,
+                }
+            )
 
         skip_inv04_ac = day == COMM_DAY and 11 * 60 <= hm < 13 * 60
 

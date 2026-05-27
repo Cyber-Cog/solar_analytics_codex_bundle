@@ -20,6 +20,10 @@ if errorlevel 1 (
 )
 
 if not defined DB_STATEMENT_TIMEOUT_MS set "DB_STATEMENT_TIMEOUT_MS=300000"
+REM Schema already exists on RDS/local — skip slow create_all on every boot (~15s saved).
+if not defined SOLAR_SKIP_CREATE_ALL set "SOLAR_SKIP_CREATE_ALL=1"
+REM main.py already runs safe migrations in a background thread; do not block uvicorn here.
+if not defined SOLAR_MIGRATIONS_ON_BOOT set "SOLAR_MIGRATIONS_ON_BOOT=background"
 
 REM We are running on port 8000 now.
 set "PORT=8000"
@@ -40,17 +44,19 @@ if errorlevel 1 (
   exit /b 1
 )
 
-REM Open browser only after port 8000 listens (avoids ERR_CONNECTION_REFUSED).
-start /b cmd /c "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$port=%PORT%; $deadline=(Get-Date).AddSeconds(90); while((Get-Date) -lt $deadline) { if (Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue) { Start-Process ('http://127.0.0.1:' + $port + '/'); exit 0 }; Start-Sleep -Milliseconds 400 }; Write-Host '[WARN] Port' $port 'not listening within 90s.'\""
-
-echo  Server running at: http://127.0.0.1:%PORT%
-echo  DB_STATEMENT_TIMEOUT_MS=%DB_STATEMENT_TIMEOUT_MS%
-echo  Keep this window open. Close it to stop.
+echo  Starting server on http://127.0.0.1:%PORT% ...
+echo  First boot can take 20-40s while Python connects to the database (AWS RDS).
+echo  Do NOT close this window — closing it stops the server.
+echo  If the browser shows "refused", wait here until you see "Application startup complete".
 echo  ----------------------------------------
 echo.
 
-echo [INFO] Applying pending SQL migrations...
-python -m migrations.runner auto
+REM Open browser only after HTTP responds (port alone is not enough during slow import).
+start /b cmd /c "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$port=%PORT%; $url='http://127.0.0.1:'+$port+'/'; $deadline=(Get-Date).AddSeconds(120); while((Get-Date) -lt $deadline) { try { $r=Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200) { Start-Process $url; exit 0 } } catch {}; Start-Sleep -Milliseconds 500 }; Write-Host '[WARN] Server did not respond at' $url 'within 120s. Open that URL manually after startup completes.'\""
+
+echo  DB_STATEMENT_TIMEOUT_MS=%DB_STATEMENT_TIMEOUT_MS%
+echo  SOLAR_SKIP_CREATE_ALL=%SOLAR_SKIP_CREATE_ALL%
+echo  ----------------------------------------
 echo.
 
 REM "python -m uvicorn" works even when the Scripts dir isn't on PATH.

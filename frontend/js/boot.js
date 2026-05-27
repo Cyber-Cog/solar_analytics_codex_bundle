@@ -16,7 +16,8 @@
 (function () {
   'use strict';
 
-  var ASSET_BUILD_ID = '2026-05-10-ds-tolerance-gb-pr-loss';
+  var ASSET_BUILD_ID = '2026-05-27-iceberg-corp-v6';
+  window.SOLAR_ASSET_BUILD_ID = ASSET_BUILD_ID;
 
   function perfLog(label, t0) {
     try {
@@ -89,19 +90,25 @@
   var _fetchedText = Object.create(null);
   var _chunkPromises = Object.create(null);
 
+  function scriptCacheKey(src) {
+    return ASSET_BUILD_ID + '::' + src;
+  }
+
   function fetchScriptText(src) {
-    if (_fetchedText[src]) return _fetchedText[src];
-    _fetchedText[src] = fetch(src + cacheBust, { credentials: 'same-origin' })
+    var key = scriptCacheKey(src);
+    if (_fetchedText[key]) return _fetchedText[key];
+    _fetchedText[key] = fetch(src + cacheBust, { credentials: 'same-origin' })
       .then(function (res) {
         if (!res.ok) throw new Error('failed to fetch ' + src + ' (' + res.status + ')');
         return res.text();
       });
-    return _fetchedText[src];
+    return _fetchedText[key];
   }
 
   function loadScript(src) {
-    if (_loaded[src]) return _loaded[src];
-    _loaded[src] = fetchScriptText(src).then(function (code) {
+    var key = scriptCacheKey(src);
+    if (_loaded[key]) return _loaded[key];
+    _loaded[key] = fetchScriptText(src).then(function (code) {
       return new Promise(function (resolve, reject) {
         var s = document.createElement('script');
         s.text = [
@@ -123,7 +130,7 @@
         }
       });
     });
-    return _loaded[src];
+    return _loaded[key];
   }
 
   function loadAllOrdered(srcs) {

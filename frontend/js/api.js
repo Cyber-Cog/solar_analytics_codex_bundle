@@ -213,11 +213,12 @@ const LossAnalysis = {
       `/api/dashboard/loss-analysis/options?plant_id=${encodeURIComponent(plantId || '')}`,
       `/api/loss-analysis/options?plant_id=${encodeURIComponent(plantId || '')}`,
     ]),
-  bridge: (plantId, dateFrom, dateTo, scope, equipmentId) => {
+  bridge: (plantId, dateFrom, dateTo, scope, equipmentId, forceRefresh = false) => {
     const q = new URLSearchParams({ plant_id: plantId || '', scope: scope || 'plant' });
     if (dateFrom) q.set('date_from', dateFrom);
     if (dateTo) q.set('date_to', dateTo);
     if (equipmentId) q.set('equipment_id', equipmentId);
+    if (forceRefresh) q.set('force_refresh', 'true');
     const qs = q.toString();
     return apiFetchFirstOk([
       `/api/dashboard/loss-analysis/bridge?${qs}`,

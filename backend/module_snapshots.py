@@ -184,6 +184,23 @@ def save_unified_fault_snapshot(db: Session, plant_id: str, date_from: str, date
         db.rollback()
 
 
+LOSS_BRIDGE_PAYLOAD_VERSION = 2
+
+
+def is_loss_bridge_snapshot_valid(payload: dict) -> bool:
+    """Reject pre-iceberg snapshots that only had category MWh (no fault_count)."""
+    if not payload or not isinstance(payload, dict):
+        return False
+    if payload.get("error"):
+        return True
+    if int(payload.get("bridge_payload_version") or 0) < LOSS_BRIDGE_PAYLOAD_VERSION:
+        return False
+    ice = payload.get("iceberg_faults")
+    if not isinstance(ice, list) or len(ice) == 0:
+        return False
+    return any(isinstance(r, dict) and "fault_count" in r for r in ice)
+
+
 def get_loss_analysis_snapshot(
     db: Session,
     plant_id: str,
@@ -209,9 +226,25 @@ def get_loss_analysis_snapshot(
     if not is_snapshot_fresh(db, plant_id, row.computed_at):
         return None
     try:
-        return json.loads(row.payload_json)
+        payload = json.loads(row.payload_json)
     except Exception:
         return None
+    if not is_loss_bridge_snapshot_valid(payload):
+        return None
+    return payload
+
+
+def invalidate_loss_analysis_snapshots(db: Session, plant_id: str) -> int:
+    """Drop cached loss bridge payloads so metadata/spec edits show on next load."""
+    if not plant_id:
+        return 0
+    try:
+        r = db.execute(delete(LossAnalysisSnapshot).where(LossAnalysisSnapshot.plant_id == plant_id))
+        db.commit()
+        return int(r.rowcount or 0)
+    except Exception:
+        db.rollback()
+        return 0
 
 
 def save_loss_analysis_snapshot(

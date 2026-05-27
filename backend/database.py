@@ -44,6 +44,7 @@ def _engine_kwargs(pool_size: int, max_overflow: int) -> dict:
         "pool_pre_ping": True,
         # TCP keepalive so NAT gateways / EC2 don't drop idle connections
         "connect_args": {
+            "connect_timeout": int(os.environ.get("DB_CONNECT_TIMEOUT_SEC", "15")),
             "options": f"-c statement_timeout={_STATEMENT_TIMEOUT_MS}",
             "keepalives": 1,
             "keepalives_idle": 30,

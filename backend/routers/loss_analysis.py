@@ -37,6 +37,9 @@ from ac_power_energy_sql import sql_inverter_performance_with_energy
 _loss_routes = APIRouter(tags=["Loss Analysis"])
 _log = logging.getLogger(__name__)
 
+# Bump when bridge JSON shape changes (iceberg_faults + fault_count required).
+LOSS_BRIDGE_PAYLOAD_VERSION = 2
+
 DEFAULT_TEMP_COEFF = 0.004  # ~0.4% energy per °C above 25 when no module gamma
 
 
@@ -347,6 +350,35 @@ def _waterfall_bridge_segments(primary: Dict[str, Any]) -> List[Dict[str, Any]]:
     return segs
 
 
+def _iceberg_faults_from_categories(
+    categories: List[dict],
+    alloc_factor: float = 1.0,
+) -> List[Dict[str, Any]]:
+    """
+    Per Fault Diagnostics category: fault_count (above sea) + loss_mwh (below sea).
+    Same unified-feed source as the Fault Diagnostics overview.
+    """
+    fac = max(0.0, float(alloc_factor))
+    out: List[Dict[str, Any]] = []
+    for c in categories or []:
+        cid = str(c.get("id") or "").strip()
+        if not cid:
+            continue
+        fc = int(c.get("fault_count") or 0)
+        lm = round(float(c.get("loss_mwh") or 0) * fac, 4)
+        out.append(
+            {
+                "id": cid,
+                "label": str(c.get("label") or cid),
+                "fault_count": fc,
+                "loss_mwh": lm,
+                "metric_note": c.get("metric_note"),
+            }
+        )
+    out.sort(key=lambda x: (float(x.get("loss_mwh") or 0), int(x.get("fault_count") or 0)), reverse=True)
+    return out
+
+
 def compute_plant_expected_actual_mwh_for_range(
     db: Session, plant_id: str, date_from: str, date_to: str
 ) -> Dict[str, Any]:
@@ -437,7 +469,12 @@ def build_loss_bridge_payload(
 
     insolation = _insolation_kwh_m2(db, table, plant_id, f_ts, t_ts)
     wms = _wms_kpis_payload(db, table, plant_id, f_ts, t_ts)
-    module_temp_c = float(wms.get("module_temp") or 25.0)
+    _mt = wms.get("module_temp")
+    module_temp_c = float(_mt) if _mt is not None and float(_mt) > 0 else 25.0
+    if module_temp_c <= 25.0:
+        _amb = wms.get("ambient_temp")
+        if _amb is not None and float(_amb) > 25.0:
+            module_temp_c = float(_amb) + 8.0
     temp_coeff = DEFAULT_TEMP_COEFF
     tc_mod = _module_temp_coeff(db, plant_id)
     if tc_mod:
@@ -584,12 +621,45 @@ def build_loss_bridge_payload(
         return {"error": "invalid_scope", "message": "scope must be plant, inverter, scb, or string"}
 
     assert primary is not None
+    # Non-plant: avoid returning an all-zero waterfall (misleading UI) when there is
+    # no DC in metadata for the string/SCB, no matching inverter, or no telemetry.
+    if scope_l != "plant":
+        _exp = float(primary.get("expected_mwh") or 0.0)
+        _act = float(primary.get("actual_mwh") or 0.0)
+        if _exp <= 1e-9 and _act <= 1e-9:
+            return {
+                "error": "no_scope_energy",
+                "message": (
+                    "No energy data at this level: expected and actual are both zero. "
+                    "This often means no DC capacity in metadata for the selected string/SCB, "
+                    "or no metered generation in the date range. Use Plant or Inverter (or another "
+                    "SCB/string), or update plant architecture / equipment specs."
+                ),
+                "scope": scope_l,
+            }
+
     wf_bridge = _waterfall_bridge_segments(primary)
+
+    iceberg_alloc = 1.0
+    if scope_l == "inverter" and equipment_id:
+        inv_dc = inv_dc_map.get((equipment_id or "").strip(), 0.0)
+        iceberg_alloc = (inv_dc / plant_dc) if plant_dc > 0 else 1.0
+    elif scope_l == "scb" and equipment_id:
+        scb_dc = _scb_dc_kwp(db, plant_id, (equipment_id or "").strip())
+        iceberg_alloc = (scb_dc / plant_dc) if plant_dc > 0 else 0.0
+    elif scope_l == "string" and equipment_id:
+        parts = (equipment_id or "").strip().split("::")
+        if len(parts) == 3:
+            str_dc = _string_dc_kw(db, plant_id, parts[0], parts[1], parts[2])
+            iceberg_alloc = (str_dc / plant_dc) if plant_dc > 0 else 0.0
+
+    iceberg_faults = _iceberg_faults_from_categories(categories, iceberg_alloc)
 
     worst = sorted(table_rows, key=lambda r: abs(float(r.get("unknown_mwh") or 0.0)), reverse=True)[:10]
     worst_unknown_chart = [{"id": r["entity_id"] or r["label"], "label": r["label"], "unknown_mwh": r["unknown_mwh"]} for r in worst]
 
     return {
+        "bridge_payload_version": LOSS_BRIDGE_PAYLOAD_VERSION,
         "date_from": _from,
         "date_to": _to,
         "plant_id": plant_id,
@@ -600,13 +670,29 @@ def build_loss_bridge_payload(
         "fault_categories_source": "unified_feed",
         "primary": primary,
         "waterfall_bridge": wf_bridge,
+        "iceberg_faults": iceberg_faults,
+        "fault_categories": [
+            {
+                "id": c["id"],
+                "label": c.get("label") or c["id"],
+                "fault_count": int(c.get("fault_count") or 0),
+                "loss_mwh": round(float(c.get("loss_mwh") or 0), 4),
+                "metric_note": c.get("metric_note"),
+            }
+            for c in categories
+        ],
+        "iceberg_scope_note": (
+            None
+            if scope_l == "plant"
+            else "MWh losses are prorated to the selected equipment; fault counts match plant-level Fault Diagnostics."
+        ),
         "table": table_rows if scope_l == "plant" else table_rows,
         "worst_unknown": worst_unknown_chart,
         "notes": [
             "Expected (MWh) = DC kWp × insolation (kWh/m²) / 1000.",
-            "Waterfall: each loss steps down from Expected; Unknown bridges to Actual.",
-            "Fault Diagnostics bars use the same category MWh as the Faults overview (new categories appear automatically).",
-            "Table keeps aggregated All losses; chart shows individual steps.",
+            "Waterfall: Expected → degradation → temperature → each fault category → unknown → actual.",
+            "Iceberg: per Fault Diagnostics category; above sea = fault count, below sea = MWh impact.",
+            "Table keeps aggregated All losses.",
         ],
     }
 
@@ -618,6 +704,7 @@ def loss_bridge(
     date_to: Optional[str] = Query(None),
     scope: str = Query("plant", description="plant | inverter | scb | string"),
     equipment_id: Optional[str] = Query(None, description="inverter id, scb id, or string key inv::scb::str"),
+    force_refresh: bool = Query(False, description="Bypass cached snapshot and recompute"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -642,11 +729,16 @@ def loss_bridge(
             record_compute_ms("loss_bridge_http", (time.perf_counter() - t0) * 1000.0, f"stale ro plant={plant_id}")
             return attach_snapshot_stale_meta(payload)
         raise HTTPException(503, detail=SNAPSHOT_STALE_HTTP_DETAIL)
-    snap = get_loss_analysis_snapshot(db, plant_id, _from, _to, scope_l, equipment_id or "")
+    snap = None if force_refresh else get_loss_analysis_snapshot(db, plant_id, _from, _to, scope_l, equipment_id or "")
     if snap is not None:
-        record_snapshot("loss_bridge", True)
-        record_compute_ms("loss_bridge_http", (time.perf_counter() - t0) * 1000.0, f"hit plant={plant_id}")
-        return snap
+        snap_from = str(snap.get("date_from") or "")[:10]
+        snap_to = str(snap.get("date_to") or "")[:10]
+        if snap_from != _from[:10] or snap_to != _to[:10]:
+            snap = None
+        else:
+            record_snapshot("loss_bridge", True)
+            record_compute_ms("loss_bridge_http", (time.perf_counter() - t0) * 1000.0, f"hit plant={plant_id}")
+            return snap
     record_snapshot("loss_bridge", False)
     out = build_loss_bridge_payload(db, plant_id, date_from, date_to, scope, equipment_id, current_user)
     if isinstance(out, dict) and not out.get("error"):

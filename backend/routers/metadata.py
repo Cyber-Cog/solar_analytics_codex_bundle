@@ -21,6 +21,7 @@ from typing import List, Optional, Sequence
 from database import get_db, SessionLocal
 from db_perf import refresh_15m_cache
 from dashboard_cache import invalidate_plant as invalidate_dashboard_cache
+from module_snapshots import invalidate_loss_analysis_snapshots
 from models import (
     PlantArchitecture,
     EquipmentSpec,
@@ -338,11 +339,13 @@ def add_equipment_spec(
                 setattr(existing, k, v)
         db.commit()
         db.refresh(existing)
+        invalidate_loss_analysis_snapshots(db, payload.plant_id)
         return existing
     row = EquipmentSpec(**{k: v for k, v in data.items() if hasattr(EquipmentSpec, k)})
     db.add(row)
     db.commit()
     db.refresh(row)
+    invalidate_loss_analysis_snapshots(db, payload.plant_id)
     return row
 
 
@@ -536,6 +539,7 @@ async def upload_equipment_excel(
         count += 1
 
     db.commit()
+    invalidate_loss_analysis_snapshots(db, plant_id)
     return {"success": True, "rows_imported": count}
 
 

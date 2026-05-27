@@ -9,7 +9,7 @@ from sqlalchemy import text
 from sqlalchemy import func
 from sqlalchemy.exc import OperationalError
 import statistics
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 _log = logging.getLogger(__name__)
 from auth.routes import get_current_user
@@ -58,7 +58,7 @@ from snap_perf import record_compute_ms, record_snapshot
 router = APIRouter(prefix="/api/faults", tags=["Faults"])
 
 # Bump when DS summary JSON semantics change so DB snapshots are recomputed even if still "fresh" vs raw_data_stats.
-DS_SUMMARY_PAYLOAD_VERSION = 9
+DS_SUMMARY_PAYLOAD_VERSION = 12
 # Bump when unified-feed category semantics change (e.g. IS energy/count) so DB
 # unified_fault_snapshot rows are not served stale for exact date_from/date_to keys.
 UNIFIED_FAULT_PAYLOAD_VERSION = 15
@@ -66,7 +66,7 @@ GB_TAB_PAYLOAD_VERSION = 3
 # Bump when IS tab JSON semantics change (e.g. irradiance join) so DB snapshots recompute.
 IS_TAB_PAYLOAD_VERSION = 3
 # Bump when CD tab JSON semantics change (e.g. GTI merge_asof) so DB snapshots recompute.
-CD_TAB_PAYLOAD_VERSION = 3
+CD_TAB_PAYLOAD_VERSION = 4
 DS_MIN_CONFIRMED_POINTS = int(os.getenv("DS_MIN_CONFIRMED_POINTS", "3"))
 
 _MEM_PL_PAGE = "faults_pl_page_v2"
@@ -483,23 +483,10 @@ def _fault_timeline_query(session: Session, plant_id: str, scb_id: Optional[str]
     return query
 
 
-def _count_scbs_with_current_telemetry_in_range(
-    db: Session, plant_id: str, date_from: Optional[str], date_to: Optional[str]
-) -> Optional[int]:
-    """Distinct non-spare SCBs that had string- or SCB-level current telemetry in the window.
-
-    This measures **ingestion / communication**, not rows in `fault_diagnostics` (which only
-    exists for SCBs processed by the DS engine and wrongly capped the old KPI at ~active DS).
-    """
-    if not date_from or not date_to:
-        return None
-    f_ts = f"{str(date_from)[:10]} 00:00:00"
-    t_ts = f"{str(date_to)[:10]} 23:59:59"
-    try:
-        n = db.execute(
-            text(
-                """
-                SELECT COUNT(DISTINCT u.scb_id)::int
+def _scb_telemetry_union_sql() -> str:
+    """Shared subquery: distinct non-spare SCB ids with current telemetry in range."""
+    return """
+                SELECT DISTINCT u.scb_id
                   FROM (
                         SELECT pa.scb_id
                           FROM raw_data_generic r
@@ -563,17 +550,110 @@ def _count_scbs_with_current_telemetry_in_range(
                            AND pa.scb_id IS NOT NULL
                            AND COALESCE(pa.spare_flag, false) = false
                        ) u
-                """
-            ),
+    """
+
+
+def _scb_ids_with_current_telemetry_in_range(
+    db: Session, plant_id: str, date_from: Optional[str], date_to: Optional[str]
+) -> Optional[set]:
+    """Non-spare SCB ids with string/SCB current in raw or derived tables (communication OK)."""
+    if not date_from or not date_to:
+        return None
+    f_ts = f"{str(date_from)[:10]} 00:00:00"
+    t_ts = f"{str(date_to)[:10]} 23:59:59"
+    try:
+        rows = db.execute(
+            text(_scb_telemetry_union_sql()),
             {"p": plant_id, "f": f_ts, "t": t_ts},
-        ).scalar()
-        return int(n or 0)
+        ).fetchall()
+        return {str(r[0]) for r in rows if r and r[0]}
     except OperationalError as exc:
-        _log.warning("telemetry SCB count skipped (timeout/index): %s", exc)
+        _log.warning("telemetry SCB set skipped (timeout/index): %s", exc)
         return None
     except Exception:
-        _log.exception("telemetry SCB count failed plant=%s", plant_id)
+        _log.exception("telemetry SCB set failed plant=%s", plant_id)
         return None
+
+
+def _count_scbs_with_current_telemetry_in_range(
+    db: Session, plant_id: str, date_from: Optional[str], date_to: Optional[str]
+) -> Optional[int]:
+    """Distinct non-spare SCBs that had string- or SCB-level current telemetry in the window."""
+    scb_set = _scb_ids_with_current_telemetry_in_range(db, plant_id, date_from, date_to)
+    if scb_set is None:
+        return None
+    return len(scb_set)
+
+
+def _non_spare_scb_ids_from_arch(db: Session, plant_id: str, spare_scbs: set) -> List[str]:
+    try:
+        rows = db.execute(
+            text(
+                """
+                SELECT DISTINCT scb_id
+                FROM plant_architecture
+                WHERE plant_id = :p
+                  AND scb_id IS NOT NULL
+                  AND COALESCE(spare_flag, false) = false
+                ORDER BY scb_id
+                """
+            ),
+            {"p": plant_id},
+        ).fetchall()
+    except Exception:
+        rows = db.execute(
+            text(
+                "SELECT DISTINCT scb_id FROM plant_architecture "
+                "WHERE plant_id = :p AND scb_id IS NOT NULL ORDER BY scb_id"
+            ),
+            {"p": plant_id},
+        ).fetchall()
+    return [str(r[0]) for r in rows if r[0] and str(r[0]) not in spare_scbs]
+
+
+def _ds_quality_filter_sets(
+    db: Session, plant_id: str, date_from: Optional[str], date_to: Optional[str]
+) -> Dict[str, set]:
+    """Outlier / constant / leakage SCB ids from DS filter_summary cache (one pass per day)."""
+    from datetime import date as _date, timedelta
+
+    outlier_set: set = set()
+    constant_set: set = set()
+    leakage_set: set = set()
+    if not date_from or not date_to:
+        return {"outlier": outlier_set, "constant": constant_set, "leakage": leakage_set}
+    try:
+        start = _date.fromisoformat(str(date_from)[:10])
+        end = _date.fromisoformat(str(date_to)[:10])
+        d = start
+        while d <= end:
+            key = f"filter_summary:{plant_id}:{d.isoformat()}"
+            day_data = get_cached(db, key, 876000)
+            if day_data and isinstance(day_data, dict):
+                outlier_set.update(day_data.get("outlier", []) or [])
+                constant_set.update(day_data.get("constant", []) or [])
+                leakage_set.update(day_data.get("leakage", []) or [])
+            d += timedelta(days=1)
+    except Exception:
+        pass
+    return {"outlier": outlier_set, "constant": constant_set, "leakage": leakage_set}
+
+
+def _ds_constant_scbs_in_range(
+    db: Session, plant_id: str, date_from: Optional[str], date_to: Optional[str]
+) -> set:
+    return _ds_quality_filter_sets(db, plant_id, date_from, date_to)["constant"]
+
+
+def _fault_range_day_count(date_from: Optional[str], date_to: Optional[str]) -> int:
+    if not date_from or not date_to:
+        return 0
+    try:
+        start = _date.fromisoformat(str(date_from)[:10])
+        end = _date.fromisoformat(str(date_to)[:10])
+        return max(0, (end - start).days + 1)
+    except Exception:
+        return 0
 
 
 def _get_arch_spare_and_total(db: Session, plant_id: str):
@@ -1040,6 +1120,107 @@ def _serialize_fault_row(r):
     }
 
 
+def _ds_range_where(plant_id: str, date_from: Optional[str], date_to: Optional[str]) -> Tuple[str, dict]:
+    f_ts = f"{date_from} 00:00:00" if date_from else None
+    t_ts = f"{date_to} 23:59:59" if date_to else None
+    where = "WHERE plant_id = :p"
+    params: dict = {"p": plant_id}
+    if f_ts:
+        where += " AND timestamp >= :f"
+        params["f"] = f_ts
+    if t_ts:
+        where += " AND timestamp <= :t"
+        params["t"] = t_ts
+    return where, params
+
+
+def _heatmap_status_for_scb(
+    scb_id: str,
+    range_min_map: dict,
+    telemetry_scbs: Optional[set],
+    constant_scbs: set,
+    diag_seen_scbs: set,
+) -> str:
+    """
+    Plant heatmap cell state (matches frontend legend):
+    no_fault | fault | bad_data | comm_issue
+    """
+    if scb_id in constant_scbs:
+        return "bad_data"
+    info = range_min_map.get(scb_id)
+    final_min = int(info.get("min_ms") or 0) if info else 0
+    if final_min > 0:
+        return "fault"
+    if telemetry_scbs is not None:
+        return "no_fault" if scb_id in telemetry_scbs else "comm_issue"
+    # Telemetry query failed — infer from DS engine rows only (avoid false grey on healthy SCBs).
+    return "no_fault" if scb_id in diag_seen_scbs else "comm_issue"
+
+
+def _build_ds_heatmap_by_scb(
+    db: Session,
+    plant_id: str,
+    date_from: Optional[str],
+    date_to: Optional[str],
+    spare_scbs: set,
+    range_min_map: dict,
+    constant_scbs: Optional[set] = None,
+) -> List[dict]:
+    """
+    One row per non-spare architecture SCB for the plant heatmap.
+    Healthy SCBs with telemetry and no persistent disconnect → no_fault (green), not grey.
+    Grey only for constant/bad signal or provably missing telemetry.
+    """
+    from sqlalchemy import text as _text
+
+    constant_scbs = constant_scbs or set()
+    all_scbs = _non_spare_scb_ids_from_arch(db, plant_id, spare_scbs)
+    # Long ranges: skip heavy telemetry UNION (ds-filter-summary supplies constant/bad separately).
+    range_days = _fault_range_day_count(date_from, date_to)
+    if range_days > 31:
+        telemetry_scbs = None
+        constant_scbs = set()
+    else:
+        telemetry_scbs = _scb_ids_with_current_telemetry_in_range(db, plant_id, date_from, date_to)
+
+    where, params = _ds_range_where(plant_id, date_from, date_to)
+    sql = _text(f"""
+        SELECT DISTINCT ON (scb_id) *
+        FROM fault_diagnostics
+        {where}
+        ORDER BY scb_id, timestamp DESC
+    """)
+    rows = db.execute(sql, params).fetchall()
+    cols = [c.key for c in FaultDiagnostics.__table__.columns]
+    latest_by_scb: Dict[str, dict] = {}
+    diag_seen_scbs: set = set()
+    for r in rows:
+        obj = type("R", (), dict(zip(cols, r)))()
+        row_dict = _serialize_fault_row(obj)
+        scb = row_dict.get("scb_id")
+        if not scb or scb in spare_scbs:
+            continue
+        diag_seen_scbs.add(str(scb))
+        latest_by_scb[str(scb)] = row_dict
+
+    out: List[dict] = []
+    for scb in all_scbs:
+        info = range_min_map.get(scb)
+        final_min = int(info.get("min_ms") or 0) if info else 0
+        status = _heatmap_status_for_scb(scb, range_min_map, telemetry_scbs, constant_scbs, diag_seen_scbs)
+        base = latest_by_scb.get(scb, {"scb_id": scb, "plant_id": plant_id})
+        row_dict = dict(base)
+        row_dict["scb_id"] = scb
+        row_dict["missing_strings"] = final_min
+        row_dict["range_min_missing_strings"] = final_min
+        row_dict["has_telemetry"] = (
+            telemetry_scbs is not None and scb in telemetry_scbs
+        ) or (telemetry_scbs is None and scb in diag_seen_scbs)
+        row_dict["heatmap_status"] = status
+        out.append(row_dict)
+    return out
+
+
 def build_ds_scb_status_payload(
     db: Session,
     plant_id: str,
@@ -1047,36 +1228,29 @@ def build_ds_scb_status_payload(
     date_to: Optional[str],
 ) -> dict:
     """
-    Returns the latest fault state per SCB for the given date range.
-    Used by the main Fault Diagnostics page for the active-faults table,
-    heatmap, and bar chart. Reads directly from fault_diagnostics.
+    Active DS faults for the table (`data`) plus full-plant heatmap rows (`heatmap_by_scb`).
     """
     from sqlalchemy import text as _text
 
     spare_scbs, _ = _get_arch_spare_and_total(db, plant_id)
+    where, params = _ds_range_where(plant_id, date_from, date_to)
 
-    f_ts = f"{date_from} 00:00:00" if date_from else None
-    t_ts = f"{date_to} 23:59:59" if date_to else None
-    where = "WHERE f.plant_id = :p"
-    params: dict = {"p": plant_id}
-    if f_ts:
-        where += " AND f.timestamp >= :f"
-        params["f"] = f_ts
-    if t_ts:
-        where += " AND f.timestamp <= :t"
-        params["t"] = t_ts
+    range_min_map = _active_disconnected_strings_in_range(db, plant_id, date_from, date_to)
+    # Heatmap: fast path (no per-day filter_summary scan); /ds-filter-summary fills constant_scbs in UI.
+    heatmap_by_scb = _build_ds_heatmap_by_scb(
+        db, plant_id, date_from, date_to, spare_scbs, range_min_map, set()
+    )
 
-    # Only fetch the latest CONFIRMED_DS row for each SCB so the table reflects the fault
+    # Table: latest CONFIRMED_DS row only for SCBs with persistent disconnect in range
     sql = _text(f"""
         SELECT DISTINCT ON (scb_id) *
         FROM fault_diagnostics
-        {where.replace('f.', '')} AND fault_status = 'CONFIRMED_DS'
+        {where} AND fault_status = 'CONFIRMED_DS'
         ORDER BY scb_id, timestamp DESC
     """)
     rows = db.execute(sql, params).fetchall()
     cols = [c.key for c in FaultDiagnostics.__table__.columns]
 
-    range_min_map = _active_disconnected_strings_in_range(db, plant_id, date_from, date_to)
     scb_day_map = {}
     idx_scb = cols.index("scb_id")
     idx_ts = cols.index("timestamp")
@@ -1098,8 +1272,6 @@ def build_ds_scb_status_payload(
     for r in rows:
         obj = type("R", (), dict(zip(cols, r)))()
         row_dict = _serialize_fault_row(obj)
-        # Show all SCBs with fault rows; do not require plant_architecture to list them
-        # (incomplete uploads would otherwise hide real diagnostics).
         if row_dict["scb_id"] in spare_scbs:
             continue
         scb = row_dict["scb_id"]
@@ -1138,10 +1310,15 @@ def build_ds_scb_status_payload(
             sid = row_dict.get("scb_id")
             if sid and sid in ekwh_map:
                 row_dict["energy_loss_kwh"] = round(float(ekwh_map[sid]), 2)
+        for row_dict in heatmap_by_scb:
+            sid = row_dict.get("scb_id")
+            if sid and sid in ekwh_map:
+                row_dict["energy_loss_kwh"] = round(float(ekwh_map[sid]), 2)
 
     energy_available, energy_note = _voltage_meta(db, plant_id, date_from, date_to)
     return {
         "data": data,
+        "heatmap_by_scb": heatmap_by_scb,
         "energy_available": energy_available,
         "energy_note": energy_note,
         "payload_version": DS_SUMMARY_PAYLOAD_VERSION,
@@ -3068,34 +3245,11 @@ def get_ds_filter_summary(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Returns how many SCBs had data quality issues (outlier / constant / leakage)
-    filtered out during DS detection for the given date range.
-    Reads stored filter_summary per day from fault_cache (written by ds_detection at run time).
-    No response caching — computed from DB/cache storage each request.
-    """
-    from datetime import date as _date, timedelta
-
-    outlier_set: set = set()
-    constant_set: set = set()
-    leakage_set: set = set()
-
-    if date_from and date_to:
-        try:
-            start = _date.fromisoformat(date_from)
-            end = _date.fromisoformat(date_to)
-            d = start
-            while d <= end:
-                key = f"filter_summary:{plant_id}:{d.isoformat()}"
-                day_data = get_cached(db, key, 876000)
-                if day_data and isinstance(day_data, dict):
-                    outlier_set.update(day_data.get("outlier", []))
-                    constant_set.update(day_data.get("constant", []))
-                    leakage_set.update(day_data.get("leakage", []))
-                d += timedelta(days=1)
-        except Exception:
-            pass
-
+    """DS quality-filter SCB sets (constant / leakage / outlier) from per-day filter_summary cache."""
+    sets = _ds_quality_filter_sets(db, plant_id, date_from, date_to)
+    outlier_set = sets["outlier"]
+    constant_set = sets["constant"]
+    leakage_set = sets["leakage"]
     return {
         "outlier_count": len(outlier_set),
         "constant_count": len(constant_set),

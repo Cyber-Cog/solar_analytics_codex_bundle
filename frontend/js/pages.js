@@ -1047,7 +1047,7 @@ window.MetadataPage = ({ plantId }) => {
     const payload = {
       plant_id: equipFormData.plant_id || plantId,
       equipment_id: (equipFormData.equipment_id || '').trim(),
-      equipment_type: equipFormMode,
+      equipment_type: equipFormData.equipment_type || equipFormMode,
       manufacturer: equipFormData.manufacturer || undefined,
       model: equipFormData.model || undefined,
       rated_power: num(equipFormData.rated_power),
@@ -1072,7 +1072,7 @@ window.MetadataPage = ({ plantId }) => {
       if (equipFormFile) {
         await window.SolarAPI.Metadata.uploadSpecSheet(saved.id, equipFormFile);
       }
-      setUploadMsg({ type: 'success', text: 'Equipment spec saved.' });
+      setUploadMsg({ type: 'success', text: 'Equipment spec saved. Loss Analysis cache cleared for this plant — open Loss Analysis and click Refresh.' });
       setEquipFormOpen(false);
       loadData();
     } catch (e) {
@@ -1114,6 +1114,8 @@ window.MetadataPage = ({ plantId }) => {
     { key:'ac_capacity_kw', label:'AC Cap (kW)', csvValue:(r)=>fmtNull(r.ac_capacity_kw) },
     { key:'dc_capacity_kwp', label:'DC Cap (kWp)', csvValue:(r)=>fmtNull(r.dc_capacity_kwp) },
     { key:'rated_efficiency', label:'Rated Eff %', csvValue:(r)=>fmtNull(r.rated_efficiency) },
+    { key:'degradation_loss_pct', label:'Deg loss %', csvValue:(r)=>fmtNull(r.degradation_loss_pct) },
+    { key:'temp_coefficient_per_deg', label:'Temp coeff', csvValue:(r)=>fmtNull(r.temp_coefficient_per_deg) },
     { key:'imp', label:'Imp (A)', csvValue:(r)=>fmtNull(r.imp) },
 { key:'vmp', label:'Vmp (V)', csvValue:(r)=>fmtNull(r.vmp) },
     { key:'impp', label:'Impp (A)', csvValue:(r)=>fmtNull(r.impp) },

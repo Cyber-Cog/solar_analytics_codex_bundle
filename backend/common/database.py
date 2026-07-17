@@ -29,7 +29,9 @@ if os.path.isfile(_BACKEND_ENV):
 
 def _require_pg_url() -> str:
     url = os.environ.get("DATABASE_URL", "").strip()
-    if not url or not (url.startswith("postgresql") or url.startswith("postgres://")):
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    if not url or not url.startswith("postgresql"):
         raise RuntimeError(
             "DATABASE_URL must be set to a PostgreSQL URL (e.g. in backend/.env). "
             "SQLite (solar.db) is no longer supported."

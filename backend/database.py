@@ -14,20 +14,60 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool, QueuePool
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+def _normalize_pg_url(url: str) -> str:
+    """
+    Accept provider-style URLs and make them SQLAlchemy-2.x safe.
+    SQLAlchemy removed the legacy 'postgres://' scheme; Neon / Supabase /
+    Heroku / Render still hand out URLs in that form, so rewrite it.
+    """
+    url = (url or "").strip()
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    return url
+
+
+def _ensure_sslmode(url: str, *, serverless: bool) -> str:
+    """
+    Managed Postgres (RDS / Neon / Supabase) often requires SSL from Vercel.
+    If the URL has no sslmode and the host is not local, default to require
+    when running serverless. Override with ?sslmode=disable if needed.
+    """
+    if not url or not serverless:
+        return url
+    lower = url.lower()
+    if "sslmode=" in lower:
+        return url
+    # Local / docker hosts do not need forced SSL.
+    try:
+        from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if host in ("", "localhost", "127.0.0.1", "::1", "db", "postgres"):
+            return url
+        q = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        q["sslmode"] = "require"
+        return urlunparse(parsed._replace(query=urlencode(q)))
+    except Exception:
+        sep = "&" if "?" in url else "?"
+        return f"{url}{sep}sslmode=require"
+
+
+DATABASE_URL = _normalize_pg_url(os.environ.get("DATABASE_URL", ""))
 if not DATABASE_URL:
     raise RuntimeError(
         "DATABASE_URL is not set. Add to backend/.env, e.g.\n"
         "  DATABASE_URL=postgresql://solar:solar@localhost:5432/solar\n"
         "PostgreSQL is required; SQLite is no longer supported as the app database."
     )
-if not (DATABASE_URL.startswith("postgresql") or DATABASE_URL.startswith("postgres://")):
+if not DATABASE_URL.startswith("postgresql"):
     raise RuntimeError(
         f"DATABASE_URL must be a PostgreSQL URL (postgresql://...). Got: {DATABASE_URL[:40]}..."
     )
 
 _ECHO = os.environ.get("SQL_ECHO", "").lower() in ("1", "true")
 _SERVERLESS = os.environ.get("SOLAR_SERVERLESS", "").lower() in ("1", "true", "yes") or os.environ.get("VERCEL") == "1"
+DATABASE_URL = _ensure_sslmode(DATABASE_URL, serverless=_SERVERLESS)
 
 # Statement timeout (ms) — safety net so runaway queries don't consume the
 # entire Vercel function budget. Applies per-session on every DB connection.
@@ -39,18 +79,25 @@ _STATEMENT_TIMEOUT_MS = int(os.environ.get("DB_STATEMENT_TIMEOUT_MS", _DEFAULT_S
 
 
 def _engine_kwargs(pool_size: int, max_overflow: int) -> dict:
+    connect_args = {
+        "connect_timeout": int(os.environ.get("DB_CONNECT_TIMEOUT_SEC", "15")),
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5,
+    }
+    # Some managed Postgres endpoints reject startup GUC options from serverless.
+    _use_stmt = os.environ.get(
+        "DB_USE_STATEMENT_TIMEOUT",
+        "0" if _SERVERLESS else "1",
+    ).strip().lower() in ("1", "true", "yes")
+    if _use_stmt:
+        connect_args["options"] = f"-c statement_timeout={_STATEMENT_TIMEOUT_MS}"
+
     kwargs = {
         "echo": _ECHO,
         "pool_pre_ping": True,
-        # TCP keepalive so NAT gateways / EC2 don't drop idle connections
-        "connect_args": {
-            "connect_timeout": int(os.environ.get("DB_CONNECT_TIMEOUT_SEC", "15")),
-            "options": f"-c statement_timeout={_STATEMENT_TIMEOUT_MS}",
-            "keepalives": 1,
-            "keepalives_idle": 30,
-            "keepalives_interval": 10,
-            "keepalives_count": 5,
-        },
+        "connect_args": connect_args,
     }
     if _SERVERLESS:
         # Use a tiny QueuePool instead of NullPool.  Warm Vercel invocations
@@ -79,7 +126,10 @@ engine = create_engine(
 # pool has its own set of DB connections. If DATABASE_URL_READ is set it will
 # be used (handy when pointing reads at a read-replica); otherwise we reuse
 # the same URL with a larger pool.
-_READ_URL = os.environ.get("DATABASE_URL_READ", "").strip() or DATABASE_URL
+_READ_URL = _ensure_sslmode(
+    _normalize_pg_url(os.environ.get("DATABASE_URL_READ", "")) or DATABASE_URL,
+    serverless=_SERVERLESS,
+)
 _READ_POOL_SIZE = int(os.environ.get("DB_READ_POOL_SIZE", "20"))
 _READ_MAX_OVERFLOW = int(os.environ.get("DB_READ_MAX_OVERFLOW", "20"))
 

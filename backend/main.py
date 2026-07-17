@@ -44,7 +44,10 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, JSONResponse
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from sqlalchemy.exc import SQLAlchemyError
 
 FRONTEND_DIR = os.path.join(os.path.dirname(BACKEND_DIR), "frontend")
 IS_SERVERLESS = os.environ.get("SOLAR_SERVERLESS", "").lower() in ("1", "true", "yes") or os.environ.get("VERCEL") == "1"
@@ -101,6 +104,16 @@ def _ensure_precompute_job_spec_json_column():
         pass
 
 
+def _ensure_serverless_auth_schema():
+    """Vercel skips full create_all — ensure login/signup tables exist."""
+    try:
+        User.__table__.create(bind=engine, checkfirst=True)
+        Plant.__table__.create(bind=engine, checkfirst=True)
+        print("[schema] serverless: ensured users + plants tables")
+    except Exception as exc:
+        print(f"[schema] serverless auth tables warning: {exc}")
+
+
 # ── Create all tables on startup (safe: only creates if not exists) ───────────
 # Skip schema writes in serverless mode. Vercel Functions should boot fast and
 # should not depend on running DDL successfully during module import.
@@ -118,6 +131,7 @@ else:
     # Vercel / serverless: still add missing columns so Admin precompute & ORM match
     # without a separate Alembic run (fast IF NOT EXISTS on Postgres).
     _ensure_precompute_job_spec_json_column()
+    _ensure_serverless_auth_schema()
 
 # ── Apply pending SAFE migrations (migrations/sql/*.sql) ──────────────────────
 # Risky migrations (type changes, partitioning) live under migrations/manual/
@@ -311,6 +325,45 @@ app = FastAPI(
     redoc_url   = "/redoc",
 )
 
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_exception_json(request: Request, exc: StarletteHTTPException):
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_exception_json(request: Request, exc: RequestValidationError):
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+
+
+@app.exception_handler(SQLAlchemyError)
+async def _sqlalchemy_exception_json(request: Request, exc: SQLAlchemyError):
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": (
+                f"Database error on {request.method} {request.url.path}: "
+                f"{type(exc).__name__}: {exc}"
+            ),
+        },
+    )
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_json(request: Request, exc: Exception):
+    _solar_slow_log.exception(
+        "unhandled_api_error path=%s method=%s",
+        request.url.path,
+        request.method,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": f"{type(exc).__name__}: {exc}",
+            "path": request.url.path,
+        },
+    )
+
 # ── GZip: compress all JSON responses > 1KB (massive win for large payloads) ──
 
 
@@ -381,6 +434,42 @@ app.include_router(perf_monitor_router)
 @app.get("/health", tags=["Health"])
 def health():
     return {"status": "ok", "version": "2.0.0"}
+
+
+@app.get("/health/db", tags=["Health"])
+def health_db():
+    """Probe Postgres — first real connection; use after deploy to debug login 500s."""
+    from sqlalchemy import text
+
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+            users_tbl = conn.execute(
+                text(
+                    "SELECT EXISTS ("
+                    "  SELECT 1 FROM information_schema.tables "
+                    "  WHERE table_schema = 'public' AND table_name = 'users'"
+                    ")"
+                )
+            ).scalar()
+            user_count = 0
+            if users_tbl:
+                user_count = conn.execute(text("SELECT COUNT(*) FROM users")).scalar() or 0
+        return {
+            "status": "ok",
+            "database": "connected",
+            "users_table": bool(users_tbl),
+            "user_count": int(user_count),
+        }
+    except Exception as exc:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "error",
+                "database": "unavailable",
+                "detail": f"{type(exc).__name__}: {exc}",
+            },
+        )
 
 
 @app.get("/app", tags=["Frontend"], include_in_schema=False)

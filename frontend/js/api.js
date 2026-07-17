@@ -117,18 +117,23 @@ async function apiFetch(path, options = {}) {
     });
     if (res.status === 401 && !path.startsWith('/auth/')) { clearToken(); console.error('401 ON', path); }
     if (!res.ok) {
+      // Read body once — res.json() then res.text() leaves an empty body.
+      const raw = await res.text().catch(() => '');
       let err = null;
-      try {
-        err = await res.json();
-      } catch (_) {
-        const txt = await res.text().catch(() => '');
-        err = { detail: txt || res.statusText };
+      if (raw) {
+        try { err = JSON.parse(raw); } catch (_) { err = null; }
       }
-      let msg = err.detail ?? err.message ?? res.statusText;
+      if (!err) {
+        err = { detail: raw || res.statusText || `HTTP ${res.status}` };
+      }
+      let msg = err.detail ?? err.error ?? err.message ?? res.statusText;
       if (Array.isArray(msg)) {
         msg = msg.map((x) => (x && typeof x === 'object' && (x.msg || x.message)) ? (x.msg || x.message) : JSON.stringify(x)).join('; ');
       } else if (msg && typeof msg === 'object') {
         msg = JSON.stringify(msg);
+      }
+      if (!msg || msg === 'Internal Server Error') {
+        msg = `HTTP ${res.status}${raw ? `: ${raw}` : ''} on ${path}`;
       }
       const e = new Error(String(msg || 'API Error'));
       e.status = res.status;

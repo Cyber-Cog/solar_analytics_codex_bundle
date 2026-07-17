@@ -6,6 +6,7 @@ Authentication API routes: signup, login, /me.
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from database import get_db
@@ -106,18 +107,41 @@ def signup(payload: UserCreate, db: Session = Depends(get_db)):
 @router.post("/login", response_model=TokenResponse)
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
     """Authenticate user and return JWT token."""
-    user = db.query(User).filter(User.email == payload.email).first()
-    if not user or not verify_password(payload.password, user.hashed_password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password",
-        )
+    try:
+        user = db.query(User).filter(User.email == payload.email).first()
+        if not user or not verify_password(payload.password, user.hashed_password or ""):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect email or password",
+            )
 
-    token = create_access_token({"sub": user.email})
-    return TokenResponse(
-        access_token=token,
-        user=UserResponse.model_validate(user),
-    )
+        token = create_access_token({"sub": user.email})
+        return TokenResponse(
+            access_token=token,
+            user=UserResponse(
+                id=user.id,
+                email=user.email,
+                full_name=user.full_name,
+                is_active=bool(user.is_active) if user.is_active is not None else True,
+                is_admin=bool(user.is_admin) if user.is_admin is not None else False,
+                allowed_plants=user.allowed_plants,
+            ),
+        )
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Database unavailable for login. Set DATABASE_URL in Vercel "
+                f"(postgresql://…, SSL allowed from Vercel). Cause: {type(exc).__name__}: {exc}"
+            ),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Login failed: {type(exc).__name__}: {exc}",
+        ) from exc
 
 
 # ── GET /auth/me ──────────────────────────────────────────────────────────────

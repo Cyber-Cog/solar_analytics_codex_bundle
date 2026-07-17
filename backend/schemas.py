@@ -31,10 +31,10 @@ class UserUpdate(BaseModel):
 class UserResponse(BaseModel):
     id: int
     email: str
-    full_name: Optional[str]
-    is_active: bool
-    is_admin: bool
-    allowed_plants: Optional[str]
+    full_name: Optional[str] = None
+    is_active: bool = True
+    is_admin: bool = False
+    allowed_plants: Optional[str] = None
 
     class Config:
         from_attributes = True

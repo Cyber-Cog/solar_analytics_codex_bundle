@@ -62,3 +62,22 @@ except Exception as exc:  # pragma: no cover - deploy-time diagnostic wrapper
                 "traceback": _trace.splitlines()[-20:],
             },
         )
+
+    # Catch-all: surface the real startup error on EVERY route (e.g. POST
+    # /auth/login) instead of a bare 404. `detail` is what the frontend
+    # error handler displays, so the login form shows the actual cause.
+    @app.api_route(
+        "/{path:path}",
+        methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+        include_in_schema=False,
+    )
+    def startup_error_catch_all(path: str):
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "startup_error",
+                "detail": f"Backend failed to start: {type(exc).__name__}: {exc}",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
